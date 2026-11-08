@@ -73,7 +73,11 @@ Each takes a count of 0 with any pointer, null included, unlike the C functions.
 `move_bytes`, `fill_bytes`, `compare_bytes`, `find_byte` and `string_length` are the
 compiler's builtins, so small constant ones become a few moves or fold away; the calls left
 over reach the memcpy, memmove, memset, memcmp, bcmp, memchr and strlen that ca itself defines
-on x86-64 (see `memory/impl/`), so no libc is needed for them.
+on x86-64 (see `memory/impl/`), so no libc is needed for them. Built integer-only
+(`-mgeneral-regs-only` or `-mno-sse`, where `ca_target_feature(sse2)` is 0), those seven work
+on 64-bit words and `rep movsb`/`rep stosb` and touch no vector register, for code that runs
+where the vector state is not saved; the SSE2 and AVX2 variants and the out-of-line
+`ca::move_paths` are left out of such a build.
 
 ```c++
 #include "ca/integers.hpp"

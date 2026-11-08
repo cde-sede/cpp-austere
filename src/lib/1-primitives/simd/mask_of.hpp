@@ -39,7 +39,7 @@ namespace ca::simd {
 			return bits;
 		}
 
-#if ca_architecture(x86_64)
+#if ca_architecture(x86_64) && ca_target_feature(sse2)
 
 		/* @DOC pmovmskb over 16 byte lanes. */
 		template <typename V>
@@ -66,7 +66,8 @@ namespace ca::simd {
 
 	/* @DOC The lanes of v whose high bit is set: of a comparison (lanes of all ones or zeros),
 	   the lanes where it holds. Byte lanes of 16 and 32 are one pmovmskb on x86-64 (32 in AVX2
-	   code); other vectors, and every one at compile time, are gathered lane by lane. */
+	   code); other vectors, every one at compile time and in an integer-only build, are
+	   gathered lane by lane. */
 	template <typename V>
 	requires (ca::simd::lanes<V> <= 64U)
 	[[nodiscard, gnu::always_inline]] constexpr auto mask_of(const V& v) noexcept -> ca::simd::mask<ca::simd::lanes<V>> {
@@ -75,7 +76,7 @@ namespace ca::simd {
 		if consteval {
 			return mask{ca::simd::impl::high_bits(v)};
 		} else {
-#if ca_architecture(x86_64)
+#if ca_architecture(x86_64) && ca_target_feature(sse2)
 			if constexpr (sizeof(ca::simd::lane_of<V>) == 1U && (sizeof(V) == 16U || sizeof(V) == 32U))
 				return mask{ca::simd::impl::byte_mask(v)};
 			else

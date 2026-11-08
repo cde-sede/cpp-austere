@@ -18,7 +18,7 @@ static auto check(const ca::i64 seconds, const int year, const int month, const 
 }
 
 auto main(void) -> int {
-	if (ca::syscall::auxiliary(6U) != 4096U)
+	if (ca::syscall::auxiliary(6U).value_or(0U) != 4096U)
 		return 1;
 	if (ca::syscall::vdso_symbol("__vdso_clock_gettime") == nullptr || ca::syscall::vdso_symbol("__vdso_no_such_function") != nullptr)
 		return 2;

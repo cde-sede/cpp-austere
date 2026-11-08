@@ -8,6 +8,8 @@ porting means editing this folder.
 | `ca_compiler(clang)`, `ca_compiler(gcc)` | 1 for the compiler building the code, else 0; any other compiler fails to compile |
 | `ca_platform(linux)`, `ca_platform(macos)` | 1 for the target OS; other systems fail to compile |
 | `ca_architecture(x86_64)`, `(aarch64)`, `(riscv64)` | 1 for the target CPU; other CPUs build, all 0 |
+| `ca_target_feature(sse2)` | 1 when the build may use those instructions; 0 on another CPU and in an integer-only build (`-mgeneral-regs-only`, `-mno-sse`) |
+| `ca_target_feature(floats)` | 1 when the build may use floating-point registers; 0 only in an integer-only build (x86-64 without SSE2, aarch64 `-mgeneral-regs-only`, riscv64 without F), 1 on another CPU |
 | `ca_has_builtin(name)` | `__has_builtin(name)`, or 0 where the compiler lacks it |
 | `ca_debug` | 1 unless `NDEBUG` is defined; may be predefined to 0 or 1 |
 

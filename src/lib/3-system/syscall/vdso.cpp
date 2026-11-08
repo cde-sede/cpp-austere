@@ -14,10 +14,10 @@
 
 [[nodiscard]] auto ca::syscall::vdso_symbol(const char* const name) noexcept -> void* {
 
-	const ca::u64 base = ca::syscall::auxiliary(ca::elf::auxiliary_types::vdso);
-	if (base == 0U) [[unlikely]]
+	const auto base = ca::syscall::auxiliary(ca::elf::auxiliary_types::vdso);
+	if (!base || *base == 0U) [[unlikely]]
 		return nullptr;
-	const auto image = ca::elf::image::at(*reinterpret_cast<const ca::elf::file_header*>(base));
+	const auto image = ca::elf::image::at(*reinterpret_cast<const ca::elf::file_header*>(*base));
 	if (!image) [[unlikely]]
 		return nullptr;
 	const auto symbol = image->find(ca::elf::hashed_name::of(ca::sv::str{name}));

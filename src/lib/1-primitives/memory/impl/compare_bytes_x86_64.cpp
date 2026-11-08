@@ -83,7 +83,7 @@
 #include "1-primitives/simd/peek.hpp"
 #include "1-primitives/simd/vec.hpp"
 
-#if ca_architecture(x86_64)
+#if ca_architecture(x86_64) && ca_target_feature(sse2)
 
 #pragma GCC diagnostic ignored "-Wpsabi"
 

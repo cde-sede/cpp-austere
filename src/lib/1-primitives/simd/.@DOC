@@ -59,5 +59,7 @@ AVX2 functions, not `always_inline`: a generic template calling them builds with
 an AVX2 caller marked `[[gnu::flatten]]` inlines them.
 
 `mask_of` and `splat` are constexpr: at compile time, and for lanes no instruction gathers
-(16-bit lanes, or a CPU other than x86-64), they go lane by lane. `peek` exists only on x86-64,
-where its asm is written; elsewhere read only what is in range.
+(16-bit lanes, a CPU other than x86-64, or an integer-only build), they go lane by lane. `peek`
+exists only on x86-64 with SSE2, where its asm is written; elsewhere read only what is in range.
+In an integer-only build (`-mgeneral-regs-only`), vectors still compile: the compiler lowers
+them to general registers.

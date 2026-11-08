@@ -47,6 +47,14 @@ struct limits final;
 
 Range of an arithmetic type: min, max, lowest. Floating points add epsilon, infinity, quiet_nan; their min is the smallest positive normal. Not instantiable.
 
+### function `limits::min`
+
+```c++
+static consteval auto min(void) noexcept -> T requires ca::is_floating_point<T>;
+```
+
+Each floating-point accessor names long double only in its last branch, and there only through T, so float and double stay usable where the target refuses long double (x86-64 under -mgeneral-regs-only).
+
 ## `atomic/`
 
 Atomics over the compiler's `__atomic` builtins: `ca::atomic<T>` for integers and pointers, plus thread and signal fences. Only lock-free types are accepted, so nothing links libatomic and every operation is async-signal-safe: a signal handler may touch the same atomics as the thread it interrupted.
@@ -400,6 +408,8 @@ Compile-time facts about the build, as function-like macros: the compiler, the t
 | `ca_compiler(clang)`, `ca_compiler(gcc)` | 1 for the compiler building the code, else 0; any other compiler fails to compile |
 | `ca_platform(linux)`, `ca_platform(macos)` | 1 for the target OS; other systems fail to compile |
 | `ca_architecture(x86_64)`, `(aarch64)`, `(riscv64)` | 1 for the target CPU; other CPUs build, all 0 |
+| `ca_target_feature(sse2)` | 1 when the build may use those instructions; 0 on another CPU and in an integer-only build (`-mgeneral-regs-only`, `-mno-sse`) |
+| `ca_target_feature(floats)` | 1 when the build may use floating-point registers; 0 only in an integer-only build (x86-64 without SSE2, aarch64 `-mgeneral-regs-only`, riscv64 without F), 1 on another CPU |
 | `ca_has_builtin(name)` | `__has_builtin(name)`, or 0 where the compiler lacks it |
 | `ca_debug` | 1 unless `NDEBUG` is defined; may be predefined to 0 or 1 |
 
@@ -438,6 +448,14 @@ auto main(void) -> int {
 ```
 
 1 if the target CPU is `arch` (`x86_64`, `aarch64`, `riscv64`), else 0. Other CPUs build, with every one 0.
+
+### macro `ca_target_feature`
+
+```c++
+#define ca_target_feature(feature) (ca_target_feature_impl_##feature())
+```
+
+1 if the code is built to use the instructions `feature`, else 0. `sse2`: 0 on another CPU, and on x86-64 under -mgeneral-regs-only or -mno-sse. `floats`, floating-point registers: 0 only in an integer-only build (x86-64 without SSE2, aarch64 under -mgeneral-regs-only, riscv64 without F), 1 on another CPU.
 
 ## `config/compiler.hpp`
 
@@ -1153,7 +1171,7 @@ auto main(void) -> int {
 | `string_length(s)` | strlen, any code unit type, constexpr |
 | `compare_units`, `equal_units`, `find_unit` | memcmp, memchr over char16_t and char32_t too |
 
-Each takes a count of 0 with any pointer, null included, unlike the C functions. `copy_bytes`, `move_bytes`, `fill_bytes`, `compare_bytes`, `find_byte` and `string_length` are the compiler's builtins, so small constant ones become a few moves or fold away; the calls left over reach the memcpy, memmove, memset, memcmp, bcmp, memchr and strlen that ca itself defines on x86-64 (see `memory/impl/`), so no libc is needed for them.
+Each takes a count of 0 with any pointer, null included, unlike the C functions. `copy_bytes`, `move_bytes`, `fill_bytes`, `compare_bytes`, `find_byte` and `string_length` are the compiler's builtins, so small constant ones become a few moves or fold away; the calls left over reach the memcpy, memmove, memset, memcmp, bcmp, memchr and strlen that ca itself defines on x86-64 (see `memory/impl/`), so no libc is needed for them. Built integer-only (`-mgeneral-regs-only` or `-mno-sse`, where `ca_target_feature(sse2)` is 0), those seven work on 64-bit words and `rep movsb`/`rep stosb` and touch no vector register, for code that runs where the vector state is not saved; the SSE2 and AVX2 variants and the out-of-line `ca::move_paths` are left out of such a build.
 
 ```c++
 #include "ca/integers.hpp"
@@ -1414,7 +1432,7 @@ Signature of a compare_bytes variant (memcmp: negative, 0 or positive, bytes as 
 extern ca::atomic<ca::impl::compare_bytes_function> compare_bytes_variant;
 ```
 
-The compare_bytes variant of this CPU, picked by cpuid on the first call as move_bytes_variant. x86-64: SSE2 or AVX2 with BMI2; below one vector a masked compare, up to 8 vectors overlapping, more with a 4-vector loop; the first difference by bit scan. Calls no libc. On x86-64 the library defines the C memcmp as one jump through it.
+The compare_bytes variant of this CPU, picked by cpuid on the first call as move_bytes_variant. x86-64: SSE2 or AVX2 with BMI2; below one vector a masked compare, up to 8 vectors overlapping, more with a 4-vector loop; the first difference by bit scan. An integer-only build compares 64-bit words, the first difference by byte swap. Calls no libc. On x86-64 the library defines the C memcmp as one jump through it.
 
 ### variable `differ_bytes_variant`
 
@@ -1466,7 +1484,7 @@ Signature of a fill_bytes variant: memset semantics, count 0 accepts any pointer
 extern ca::atomic<ca::impl::fill_bytes_function> fill_bytes_variant;
 ```
 
-The fill_bytes variant of this CPU, picked by cpuid on the first call as move_bytes_variant. x86-64: SSE2 or AVX2; each stores up to 8 vectors overlapping, more with an aligned 4-vector loop, rep stosb from 32 KiB with ERMS. Calls no libc. On x86-64 the library defines the C memset as one jump through it.
+The fill_bytes variant of this CPU, picked by cpuid on the first call as move_bytes_variant. x86-64: SSE2 or AVX2; each stores up to 8 vectors overlapping, more with an aligned 4-vector loop, rep stosb from 32 KiB with ERMS. An integer-only build stores 64-bit words, rep stosb from 512 bytes with ERMS. Calls no libc. On x86-64 the library defines the C memset as one jump through it.
 
 ### function `fill_bytes_sse2`
 
@@ -1500,7 +1518,7 @@ Signature of a string_length variant: strlen semantics.
 extern ca::atomic<ca::impl::find_byte_function> find_byte_variant;
 ```
 
-The find_byte and string_length variants of this CPU, picked by cpuid on the first call as move_bytes_variant. x86-64: SSE2 or AVX2; aligned vector loads only (one never crosses a page, so the bytes around the range are read, never faulted on), 4 vectors per test past the first. Call no libc. On x86-64 the library defines the C memchr and strlen as one jump through them.
+The find_byte and string_length variants of this CPU, picked by cpuid on the first call as move_bytes_variant. x86-64: SSE2 or AVX2; aligned vector loads only (one never crosses a page, so the bytes around the range are read, never faulted on), 4 vectors per test past the first; an integer-only build, aligned 64-bit words (SWAR). Call no libc. On x86-64 the library defines the C memchr and strlen as one jump through them.
 
 ### function `find_byte_sse2`
 
@@ -1555,7 +1573,7 @@ Signature of a move_bytes variant: memmove semantics, count 0 accepts any pointe
 extern ca::atomic<ca::impl::move_bytes_function> move_bytes_variant;
 ```
 
-The move_bytes variant of this CPU. Starts on a resolver that runs cpuid on the first call, stores the variant here and forwards to it. x86-64: SSE2 or AVX2; each copies up to 8 vectors with overlapping loads and stores, more with an aligned 4-vector loop, rep movsb from 8 KiB with ERMS and non-temporal stores from half the last-level cache. Calls no libc. On x86-64 the library defines the C memcpy and memmove as one jump through it: the calls copy_bytes and move_bytes leave to the compiler land there.
+The move_bytes variant of this CPU. Starts on a resolver that runs cpuid on the first call, stores the variant here and forwards to it. x86-64: SSE2 or AVX2; each copies up to 8 vectors with overlapping loads and stores, more with an aligned 4-vector loop, rep movsb from 8 KiB with ERMS and non-temporal stores from half the last-level cache. An integer-only build (no SSE2: -mgeneral-regs-only, -mno-sse) moves 64-bit words, rep movsb from 512 bytes with ERMS, and touches no vector register. Calls no libc. On x86-64 the library defines the C memcpy and memmove as one jump through it: the calls copy_bytes and move_bytes leave to the compiler land there.
 
 ## `memory/impl/move_paths.hpp`
 
@@ -1784,7 +1802,7 @@ auto main(void) -> int {
 
 Wider vectors need their instructions enabled in the function using them, and the CPU to have them. ca compiles for baseline x86-64 (SSE2), so a 32-byte path is a function marked `[[gnu::target("avx2")]]`, picked at run time; the byte primitives of `memory/` do it once per function, on the first call (cpuid). Helpers such as `mask_of` for 32 lanes are themselves AVX2 functions, not `always_inline`: a generic template calling them builds without AVX2, and an AVX2 caller marked `[[gnu::flatten]]` inlines them.
 
-`mask_of` and `splat` are constexpr: at compile time, and for lanes no instruction gathers (16-bit lanes, or a CPU other than x86-64), they go lane by lane. `peek` exists only on x86-64, where its asm is written; elsewhere read only what is in range.
+`mask_of` and `splat` are constexpr: at compile time, and for lanes no instruction gathers (16-bit lanes, a CPU other than x86-64, or an integer-only build), they go lane by lane. `peek` exists only on x86-64 with SSE2, where its asm is written; elsewhere read only what is in range. In an integer-only build (`-mgeneral-regs-only`), vectors still compile: the compiler lowers them to general registers.
 
 ## `simd/lane_of.hpp`
 
@@ -1987,7 +2005,7 @@ requires (ca::simd::lanes<V> <= 64U)
 [[nodiscard, gnu::always_inline]] constexpr auto mask_of(const V& v) noexcept -> ca::simd::mask<ca::simd::lanes<V>>;
 ```
 
-The lanes of v whose high bit is set: of a comparison (lanes of all ones or zeros), the lanes where it holds. Byte lanes of 16 and 32 are one pmovmskb on x86-64 (32 in AVX2 code); other vectors, and every one at compile time, are gathered lane by lane.
+The lanes of v whose high bit is set: of a comparison (lanes of all ones or zeros), the lanes where it holds. Byte lanes of 16 and 32 are one pmovmskb on x86-64 (32 in AVX2 code); other vectors, every one at compile time and in an integer-only build, are gathered lane by lane.
 
 ## `simd/peek.hpp`
 
@@ -1999,7 +2017,7 @@ requires (sizeof(V) == 16U)
 [[gnu::always_inline]] inline auto peek(const void* const p, V& v) noexcept -> void;
 ```
 
-The 16 or 32 bytes at p into v, any alignment, in asm: the compiler sees no access beyond the range the caller owns, which the load may pass, never beyond p's page (the caller checks: p's offset in its 4 KiB page at most 4096 - sizeof(V)). The 16-byte one is legacy SSE (AVX state is clean at entry), the 32-byte one AVX2 code. x86-64 only.
+The 16 or 32 bytes at p into v, any alignment, in asm: the compiler sees no access beyond the range the caller owns, which the load may pass, never beyond p's page (the caller checks: p's offset in its 4 KiB page at most 4096 - sizeof(V)). The 16-byte one is legacy SSE (AVX state is clean at entry), the 32-byte one AVX2 code. x86-64 with SSE2 only.
 
 ## `simd/peek_aligned.hpp`
 
@@ -2011,7 +2029,7 @@ requires (sizeof(V) == 16U)
 [[gnu::always_inline]] inline auto peek_aligned(const void* const p, V& v) noexcept -> void;
 ```
 
-ca::simd::peek at p aligned to sizeof(V): such a load never crosses a page, so it may cover bytes before and after any range inside it with no check. x86-64 only.
+ca::simd::peek at p aligned to sizeof(V): such a load never crosses a page, so it may cover bytes before and after any range inside it with no check. x86-64 with SSE2 only.
 
 ## `simd/splat.hpp`
 

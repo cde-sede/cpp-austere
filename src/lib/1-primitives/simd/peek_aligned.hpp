@@ -11,10 +11,10 @@ namespace ca::simd {
 
 	// -- PEEK ALIGNED -------------------------------------------------------
 
-#if ca_architecture(x86_64)
+#if ca_architecture(x86_64) && ca_target_feature(sse2)
 
 	/* @DOC ca::simd::peek at p aligned to sizeof(V): such a load never crosses a page, so it may
-	   cover bytes before and after any range inside it with no check. x86-64 only. */
+	   cover bytes before and after any range inside it with no check. x86-64 with SSE2 only. */
 	template <typename V>
 	requires (sizeof(V) == 16U)
 	[[gnu::always_inline]] inline auto peek_aligned(const void* const p, V& v) noexcept -> void {

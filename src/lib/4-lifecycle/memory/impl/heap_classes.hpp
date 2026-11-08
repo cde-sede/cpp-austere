@@ -15,15 +15,11 @@ namespace ca {
 
 	namespace impl {
 
-		/* @DOC Size classes of the heap: 16 to 128 by 16, then four per doubling up to
-		   heap_largest_class. Every class is a multiple of 16, the powers of two included. */
-		inline constexpr ca::u32 heap_class_count = 48U;
+		/* @DOC Size classes of the heap: 16 to 128 by 16, then four per doubling, up to a geometry's
+		   LARGEST_CLASS. Every class is a multiple of 16, the powers of two included. */
+		inline constexpr ca::u32 heap_class_limit = 48U;
 
-		inline constexpr ca::usz heap_largest_class = 131072U;
-
-		inline constexpr ca::usz heap_span_size = 1048576U;
-
-		/* @DOC Class of a size in 1..heap_largest_class. */
+		/* @DOC Class of a size of at least 1. */
 		[[nodiscard, gnu::always_inline]] constexpr auto heap_class_of(const ca::usz size) noexcept -> ca::u32 {
 
 			const ca::usz last = size - 1U;
@@ -43,10 +39,15 @@ namespace ca {
 			return (ca::usz{1U} << (width - 1U)) + ((index - 8U) % 4U + 1U) * step;
 		}
 
-		static_assert(ca::impl::heap_class_size(ca::impl::heap_class_count - 1U) == ca::impl::heap_largest_class);
-		static_assert(ca::impl::heap_class_of(ca::impl::heap_largest_class) == ca::impl::heap_class_count - 1U);
+		/* @DOC Number of classes up to largest, a class size. */
+		[[nodiscard]] constexpr auto heap_class_count(const ca::usz largest) noexcept -> ca::u32 {
+			return ca::impl::heap_class_of(largest) + 1U;
+		}
+
+		static_assert(ca::impl::heap_class_count(131072U) == ca::impl::heap_class_limit);
+		static_assert(ca::impl::heap_class_count(2048U) == 24U);
 		static_assert([] {
-			for (ca::u32 index = 0U; index < ca::impl::heap_class_count; ++index) {
+			for (ca::u32 index = 0U; index < ca::impl::heap_class_limit; ++index) {
 				const ca::usz size = ca::impl::heap_class_size(index);
 				const ca::usz below = index == 0U ? 0U : ca::impl::heap_class_size(index - 1U);
 				if (size % 16U != 0U || ca::impl::heap_class_of(size) != index || ca::impl::heap_class_of(below + 1U) != index)

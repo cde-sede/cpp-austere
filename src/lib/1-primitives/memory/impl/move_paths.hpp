@@ -104,7 +104,7 @@ namespace ca {
 			ca::impl::move_four<ca::simd::vec<char, 16U>>(to, from, count);
 		}
 
-#if ca_architecture(x86_64)
+#if ca_architecture(x86_64) && ca_target_feature(sse2)
 
 		/* @DOC The out-of-line strategies of ca::move_paths, unchecked: the variants of
 		   move_bytes_x86_64.cpp over 16-byte vectors (more than 128 bytes), and over 32-byte ones

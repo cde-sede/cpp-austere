@@ -84,7 +84,7 @@ namespace ca {
 			return ca::result<void>{};
 		}
 
-#if ca_architecture(x86_64)
+#if ca_architecture(x86_64) && ca_target_feature(sse2)
 
 		/* @DOC More than 128 bytes forward, 64 at a time, stores aligned: to at or below from, or
 		   no overlap. */

@@ -52,7 +52,7 @@
 #include "3-system/error/last_error.hpp"
 #include "3-system/math/impl/exact_math.hpp"
 
-#if ca_platform(linux) && ca_architecture(x86_64)
+#if ca_platform(linux) && ca_architecture(x86_64) && ca_target_feature(sse2)
 
 
 // -- CA NAMESPACE -----------------------------------------------------------

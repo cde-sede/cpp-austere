@@ -79,7 +79,7 @@ namespace ca {
 				}
 
 				/* @DOC Loads name: a path when it has a slash, else a file name searched for as
-				   ld.so does (LD_LIBRARY_PATH unless the program is setuid, then the default
+				   ld.so does (LD_LIBRARY_PATH unless the program is setuid or that cannot be told, then the default
 				   directories; a dependency also looks in its requester's DT_RPATH and
 				   DT_RUNPATH, $ORIGIN expanded; no ld.so.cache). Symbols a library leaves
 				   undefined resolve to host first, then to what the running program exports

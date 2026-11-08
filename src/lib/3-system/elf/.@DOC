@@ -61,7 +61,7 @@ as absent. The vDSO, a static program and anything ca maps keep link-time addres
 #include "ca/syscall.hpp"
 
 auto main(void) -> int {
-	const ca::u64 base = ca::syscall::auxiliary(ca::elf::auxiliary_types::vdso);
+	const ca::u64 base = ca::syscall::auxiliary(ca::elf::auxiliary_types::vdso).value_or(0U);
 	if (base == 0U)
 		return 0;
 	const auto vdso = ca::elf::image::at(*reinterpret_cast<const ca::elf::file_header*>(base));

@@ -4,7 +4,8 @@ The two structures under the maps, and what they share.
 
 - `control_group.hpp`: the group of control bytes, one per slot, matched together:
   `vector_group.hpp` on x86-64 (16 bytes, one SSE2 compare and pmovmskb through `ca::simd`),
-  `swar_group.hpp` elsewhere (8 bytes in a 64-bit word, portable, no vector unit needed). A full
+  `swar_group.hpp` elsewhere and in an integer-only build (8 bytes in a 64-bit word, portable,
+  no vector unit needed). A full
   slot holds the low 7 bits of its key's hash; EMPTY and DELETED have the high bit set.
   `match(tag)` returns the slots whose tag is equal, so a lookup compares a key only on a tag hit,
   about 1 in 128 slots. Both give the same interface (`WIDTH`, `SHIFT`, `bits`, `first`, `from`),

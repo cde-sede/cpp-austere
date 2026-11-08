@@ -735,6 +735,57 @@ auto main(void) -> int {
 
 `ca::heap` serves sizes up to 128 KiB from 48 size classes (16 to 128 bytes by 16, then four per doubling, so at most 25% above the size asked for), each thread from its own 1 MiB spans with no lock and no atomic. A block finds its span by masking its address, so there is no per-block header. Any thread may free any block; one freed away from its owner goes back with a single atomic operation. Larger sizes are mapped pages, and growing them remaps without copying. The performance notes of `heap.hpp` give the costs per operation.
 
+`ca::heap` is one instantiation of `ca::basic_heap<Pages, G, Binding>`, the same engine with its three dependencies as parameters, for code where mmap and threads are not the right ones (a kernel: frames for pages, one heap per CPU, interrupts off while a heap is touched):
+
+| Parameter | ca::heap | Role |
+|---|---|---|
+| `Pages` | `ca::page_allocator` | stateless allocator of spans (aligned to their size), large blocks, heap states |
+| `G` | `ca::heap_geometry` | `ca::is_heap_geometry`: span size, largest class, spare spans, state chunk, `STATISTICS`, `CHECK_DOUBLE_FREE` |
+| `Binding` | `ca::heap_thread_binding` | where the current heap is (`current`), what keeps others off it (`pin`, `unpin`), how a new one is installed (`adopt`) |
+
+The fast paths are in `basic_heap.hpp`; the rest is in `impl/heap_engine.hpp`, which only the translation unit instantiating the heap includes. With `STATISTICS`, `statistics()` sums every heap's counters: blocks in use and spans per class, spare spans, large blocks and their bytes. With `CHECK_DOUBLE_FREE`, a bit per 16 bytes of each span marks the blocks in use, and a block freed twice, or an address off a 16-byte boundary, traps, in every build.
+
+```c++
+#include "ca/memory.hpp"
+#include "4-lifecycle/memory/impl/heap_engine.hpp"
+
+struct small_spans final {
+	static constexpr ca::usz SPAN_SIZE = 65536U;
+	static constexpr ca::usz LARGEST_CLASS = 2048U;
+	static constexpr ca::u32 SPARE_SPANS = 0U;
+	static constexpr ca::usz STATE_CHUNK = 4096U;
+	static constexpr bool STATISTICS = true;
+	static constexpr bool CHECK_DOUBLE_FREE = true;
+};
+
+template <typename Heap>
+struct one_heap final {
+	using state = typename Heap::state_type;
+	static constinit inline state* _current = Heap::empty_state();
+	struct token final {
+	};
+	static auto current(void) noexcept -> state* { return _current; }
+	static auto pin(void) noexcept -> token { return token{}; }
+	static auto unpin(token) noexcept -> void {}
+	static auto adopt(state* const heap) noexcept -> void { _current = heap; }
+};
+
+using my_heap = ca::basic_heap<ca::page_allocator, small_spans, one_heap>;
+template class ca::basic_heap<ca::page_allocator, small_spans, one_heap>;
+
+auto main(void) -> int {
+	const my_heap heap{};
+	auto block = heap.allocate(100U, 8U);
+	if (!block || block->size() != 112U)
+		return 1;
+	const auto held = my_heap::statistics();
+	if (held.small_blocks() != 1U || held.small_bytes() != 112U)
+		return 2;
+	heap.deallocate(*block, 8U);
+	return my_heap::statistics().small_blocks() == 0U ? 0 : 3;
+}
+```
+
 ## `memory/allocate_n.hpp`
 
 ### function `allocate_n`
@@ -907,6 +958,76 @@ template <ca::is_allocator_source R>
 
 A copy of source when it is an allocator, source.allocator() when it is a resource.
 
+## `memory/basic_heap.hpp`
+
+The heap engine behind ca::heap, for heaps that get their pages, their notion of "current" and their size classes from elsewhere (a kernel: frames, one heap per CPU, interrupts off).
+
+ca::basic_heap<Pages, G, Binding>:
+
+- Pages, a stateless allocator: spans (G::SPAN_SIZE bytes aligned to G::SPAN_SIZE), blocks past G::LARGEST_CLASS, and chunks of heap states. Its expand, reallocate and allocate_zeroed are used when it has them. With G::STATISTICS, a static or const usable_size(size, alignment) gives the bytes a large block of that size holds, the same for the size asked and the size returned; without one, sizes round up to Pages::ALIGNMENT.
+- G, a geometry (ca::is_heap_geometry).
+- Binding, a class template instantiated on the heap (Binding<basic_heap<...>>), with static members: current() returning the calling context's state_type* (the heap's empty_state() until adopt), always inlined; pin() and unpin(token), around every use of a heap's own spans, so that nothing else runs on that heap meanwhile (nothing for a thread's heap; interrupts off for a CPU's); adopt(state_type*), called once a context got its heap, outside any lock of the heap, which makes it current. A context whose heap goes away for good (a thread exiting) passes it to retire(), after pointing current() back to empty_state().
+
+The class holds the fast paths; the rest is in impl/heap_engine.hpp, which only the translation unit instantiating a heap includes, then names it: `template class ca::basic_heap<...>;` (heap.cpp does it for ca::heap). Two instantiations share nothing.
+
+### class `basic_heap`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+class basic_heap final;
+```
+
+A stateless allocator of size classes over spans of Pages, one heap per context of Binding: no lock and no atomic on a context's own blocks, one atomic exchange for a block freed away from its heap. Usable size is the class size. Debug builds check that a block goes back with its size class and alignment, and poison it.
+
+### function `basic_heap::empty_state`
+
+```c++
+[[nodiscard]] static constexpr auto empty_state(void) noexcept -> state_type*;
+```
+
+The heap of contexts that have not allocated yet: owns no span.
+
+### function `basic_heap::allocate_zeroed`
+
+```c++
+[[nodiscard]] auto allocate_zeroed(ca::usz size, ca::usz alignment) const noexcept -> ca::result<ca::allocation>;
+```
+
+allocate, zeroed: large blocks come zeroed from Pages when it can, small ones are filled.
+
+### function `basic_heap::expand`
+
+```c++
+[[nodiscard]] auto expand(ca::allocation block, ca::usz size, ca::usz alignment) const noexcept -> ca::optional<ca::allocation>;
+```
+
+In place when size keeps the block's class, or both sizes are large and Pages expands.
+
+### function `basic_heap::reallocate`
+
+```c++
+[[nodiscard]] auto reallocate(ca::allocation block, ca::usz size, ca::usz alignment) const noexcept -> ca::result<ca::allocation>;
+```
+
+In place when size keeps the class; large to large through Pages; otherwise a new block and a copy.
+
+### function `basic_heap::retire`
+
+```c++
+static auto retire(state_type* heap) noexcept -> void;
+```
+
+Takes heap, its context gone for good, after the remote frees it has: its empty spans go back, the rest waits in the pool for the next context.
+
+### function `basic_heap::statistics`
+
+```c++
+[[nodiscard]] static auto statistics(void) noexcept -> statistics_type
+requires (G::STATISTICS);
+```
+
+The counters of every heap, summed.
+
 ## `memory/deallocate_n.hpp`
 
 ### function `deallocate_n`
@@ -958,41 +1079,83 @@ Layout: per thread, a heap of 48 size-class queues of 1 MiB spans aligned to the
 
 Space: classes 16 to 128 by 16, then four per doubling, at most 25% over the size asked for; blocks are carved a page at a time, so untouched spans cost address space only. An emptied span goes back to the system unless it is its class's first; two per heap are kept for reuse.
 
-Threads: no lock and no atomic on a thread's own blocks. A block freed by another thread goes to its span's atomic list, collected when the owner runs out; a span marked full sends such frees to its heap instead, so that the freeing thread never touches a span the owner may release. Heaps are never freed: an exiting thread's heap (pthread key destructor) goes to a pool under a spin lock, the next new thread adopts it with its spans. A fork while another thread holds that lock leaves the child unable to start a new heap.
+Threads: no lock and no atomic on a thread's own blocks. A block freed by another thread goes to its span's atomic list, collected when the owner runs out; a span marked full sends such frees to its heap instead, so that the freeing thread never touches a span the owner may release. Heaps are never freed: an exiting thread's heap (thread key, exit stage memory) goes to a pool under a spin lock, the next new thread adopts it with its spans. A fork while another thread holds that lock leaves the child unable to start a new heap.
 
 Measurements: see dynamic_array and path; against glibc malloc, 1.25x to 2.5x faster on allocation-heavy cases, equal elsewhere.
 
-### class `heap`
+### alias `heap`
 
 ```c++
-class heap final;
+using heap = ca::basic_heap<ca::page_allocator, ca::heap_geometry, ca::heap_thread_binding>;
 ```
 
 The general-purpose, stateless allocator, default of allocator-aware types. Sizes up to 128 KiB come from size classes (16 to 128 by 16, then four per doubling), each thread serving its own spans of 1 MiB with no lock and no atomic; larger ones from page_allocator. Any thread may free any block: a block freed away from its thread goes back through one atomic exchange. Usable size is the class size. Debug builds check that a block goes back with its size class and alignment, and poison it.
 
-### function `heap::allocate_zeroed`
+## `memory/heap_class_statistics.hpp`
+
+### struct `heap_class_statistics`
 
 ```c++
-[[nodiscard]] auto allocate_zeroed(ca::usz size, ca::usz alignment) const noexcept -> ca::result<ca::allocation>;
+struct heap_class_statistics final;
 ```
 
-allocate, zeroed: large blocks come as fresh pages, small ones are filled.
+One size class of a heap: its block size, its blocks in use, the spans it holds.
 
-### function `heap::expand`
+## `memory/heap_geometry.hpp`
+
+### struct `heap_geometry`
 
 ```c++
-[[nodiscard]] auto expand(ca::allocation block, ca::usz size, ca::usz alignment) const noexcept -> ca::optional<ca::allocation>;
+struct heap_geometry final;
 ```
 
-In place when size keeps the block's class, or both sizes are large and the pages remap where they are.
+The geometry of ca::heap (see ca::is_heap_geometry): 1 MiB spans, classes up to 128 KiB, two spare spans per heap, no counters, no double-free check.
 
-### function `heap::reallocate`
+## `memory/heap_statistics.hpp`
+
+### struct `heap_statistics`
 
 ```c++
-[[nodiscard]] auto reallocate(ca::allocation block, ca::usz size, ca::usz alignment) const noexcept -> ca::result<ca::allocation>;
+template <ca::u32 N>
+struct heap_statistics final;
 ```
 
-In place when size keeps the class; large to large remaps pages without copying; otherwise a new block and a copy.
+What a ca::basic_heap with N classes holds, summed over its heaps: per class, then the spare spans, the heaps, and the large blocks with their bytes (the page source's usable sizes). Blocks other threads freed count until their heap collects them.
+
+### function `heap_statistics::small_blocks`
+
+```c++
+[[nodiscard]] constexpr auto small_blocks(void) const noexcept -> ca::usz;
+```
+
+Small blocks in use, every class.
+
+### function `heap_statistics::small_bytes`
+
+```c++
+[[nodiscard]] constexpr auto small_bytes(void) const noexcept -> ca::usz;
+```
+
+Bytes of the small blocks in use, at their class sizes.
+
+### function `heap_statistics::spans`
+
+```c++
+[[nodiscard]] constexpr auto spans(void) const noexcept -> ca::usz;
+```
+
+Spans held, spares included.
+
+## `memory/heap_thread_binding.hpp`
+
+### class `heap_thread_binding`
+
+```c++
+template <typename Heap>
+class heap_thread_binding final;
+```
+
+The binding of ca::heap (see ca::basic_heap): one heap per thread, in a constinit thread_local, retired by a thread key when the thread exits (exit stage memory), nothing to pin. Its adopt is defined in heap.cpp, for ca::heap only.
 
 ## `memory/is_allocator.hpp`
 
@@ -1060,6 +1223,24 @@ concept is_allocator_source = ca::is_allocator<ca::remove_cvref<R>> || ca::is_al
 ```
 
 Where ca::make_in and ca::as_allocator take memory from: an allocator, or a resource handing one out, references and cv-qualifiers aside.
+
+## `memory/is_heap_geometry.hpp`
+
+### concept `is_heap_geometry`
+
+```c++
+template <typename G>
+concept is_heap_geometry = ca::impl::has_heap_geometry_members<G> && ca::impl::is_valid_heap_geometry<G>();
+```
+
+The shape of a ca::basic_heap, as static constexpr members:
+
+- SPAN_SIZE (usz): bytes of a span, a power of two of at least 16 KiB, asked of the page source aligned to itself;
+- LARGEST_CLASS (usz): the largest size a span serves, a power of two up to 128 KiB and an eighth of SPAN_SIZE at most; larger blocks come from the page source;
+- SPARE_SPANS (u32): emptied spans a heap keeps for reuse instead of returning them;
+- STATE_CHUNK (usz): bytes asked of the page source at a time for heap states;
+- STATISTICS (bool): per heap and class counters, read by statistics();
+- CHECK_DOUBLE_FREE (bool): a bit per 16 bytes of each span, so that a block freed twice, or never handed out, or an address off a 16-byte boundary, traps.
 
 ## `memory/is_stateful_allocator.hpp`
 
@@ -1189,9 +1370,13 @@ The internals of `ca::heap` and `ca::arena`.
 
 ### Heap
 
-- `heap_classes.hpp`: the 48 size classes, 16 to 128 bytes by 16, then four per doubling up to `heap_largest_class` (128 KiB). Every class is a multiple of 16. `heap_class_of(size)` is a shift for small sizes and a `bit_width` above 128, always inlined: it sits on the allocation fast path.
-- `heap_span.hpp`: a span is 1 MiB aligned to its size, serving one class from its start, its header in the last bytes, so `heap_span_of(block)` finds it by masking the block's address. The header's first cache line belongs to the owning thread (its free list, its use count); the second takes frees from other threads, as an atomic list, or the marker `heap_span_full` once the owner found the span exhausted, after which such frees go to the owner heap's `_pending` list instead, so a foreign thread never touches a span the owner may release.
-- `heap_state.hpp`: one heap per thread (`heap_current`, `constinit thread_local`), holding per class a queue of spans with room. Threads that have not allocated yet point at `heap_empty_state`, whose classes all hold `heap_empty_span`, so the fast path has no null check: the first allocation takes the slow path and builds a real heap. Heaps are never freed: a thread's exit hands its heap to a pool (via a thread key, layer 3), and the next new thread adopts it with its spans.
+Everything below is templated on the geometry `G` (`ca::is_heap_geometry`) of a `ca::basic_heap`; `ca::heap`'s is 1 MiB spans and classes up to 128 KiB.
+
+- `heap_classes.hpp`: up to 48 size classes, 16 to 128 bytes by 16, then four per doubling up to `G::LARGEST_CLASS`. Every class is a multiple of 16. `heap_class_of(size)` is a shift for small sizes and a `bit_width` above 128, always inlined: it sits on the allocation fast path.
+- `heap_span.hpp`: a span is `G::SPAN_SIZE` bytes aligned to its size, serving one class from its start, its header in the last bytes, so `heap_span_of(block)` finds it by masking the block's address. The header's first cache line belongs to the owning heap (its free list, its use count); the second takes frees from other heaps, as an atomic list, or the full mark once the owner found the span exhausted, after which such frees go to the owner heap's `_pending` list instead, so a foreign thread never touches a span the owner may release. With `G::CHECK_DOUBLE_FREE`, a bit per 16 bytes, right below the header, marks the blocks in use (`heap_mark`, `heap_unmark`, which also traps on an address off a 16-byte boundary); frees from other heaps are checked when the owner collects them.
+- `heap_state.hpp`: a heap, holding per class a queue of spans with room, and with `G::STATISTICS` its counters (blocks in use and spans per class, spare spans), written by the owner alone with relaxed stores. Contexts that have not allocated yet point at the heap's `empty_state()`, whose classes all hold the empty span, so the fast path has no null check: the first allocation takes the slow path, which builds a real heap and gives it to the binding. Heaps are never freed: a retired one (`ca::heap`: a thread's exit, through a thread key) goes to a pool, and the next new context adopts it with its spans.
+- `heap_engine.hpp`: the slow paths, the pool and the large-block counters of one instantiation, internal to the translation unit that includes it and names the instantiation.
+- `heap_traps.hpp`: the named traps of the heap's checks.
 
 ### Arena
 
@@ -1217,13 +1402,13 @@ An arena, kept in its first chunk after the chunk header so that it never moves:
 
 ## `memory/impl/heap_classes.hpp`
 
-### variable `impl::heap_class_count`
+### variable `impl::heap_class_limit`
 
 ```c++
-inline constexpr ca::u32 heap_class_count = 48U;
+inline constexpr ca::u32 heap_class_limit = 48U;
 ```
 
-Size classes of the heap: 16 to 128 by 16, then four per doubling up to heap_largest_class. Every class is a multiple of 16, the powers of two included.
+Size classes of the heap: 16 to 128 by 16, then four per doubling, up to a geometry's LARGEST_CLASS. Every class is a multiple of 16, the powers of two included.
 
 ### function `impl::heap_class_of`
 
@@ -1231,7 +1416,7 @@ Size classes of the heap: 16 to 128 by 16, then four per doubling up to heap_lar
 [[nodiscard, gnu::always_inline]] constexpr auto heap_class_of(const ca::usz size) noexcept -> ca::u32;
 ```
 
-Class of a size in 1..heap_largest_class.
+Class of a size of at least 1.
 
 ### function `impl::heap_class_size`
 
@@ -1241,62 +1426,434 @@ Class of a size in 1..heap_largest_class.
 
 Block size of a class.
 
+### function `impl::heap_class_count`
+
+```c++
+[[nodiscard]] constexpr auto heap_class_count(const ca::usz largest) noexcept -> ca::u32;
+```
+
+Number of classes up to largest, a class size.
+
+## `memory/impl/heap_engine.hpp`
+
+The out-of-line part of ca::basic_heap: included only by the translation unit that instantiates a heap (`template class ca::basic_heap<Pages, G, Binding>;`), so that every other one calls the slow paths without seeing them.
+
+### struct `impl::heap_access`
+
+```c++
+struct heap_access final;
+```
+
+What of a ca::basic_heap its engine reaches.
+
+### struct `impl::heap_engine`
+
+```c++
+template <typename Heap>
+struct heap_engine final;
+```
+
+The state and the helpers of one heap instantiation: the pool of heap states under a spin lock, the list of every heap, the large-block counters.
+
+### function `is_small`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::is_small(const ca::usz size, const ca::usz alignment) noexcept -> bool;
+```
+
+Whether a size class serves size at alignment.
+
+### function `class_for`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::class_for(const ca::usz size, const ca::usz alignment) noexcept -> ca::u32;
+```
+
+The smallest class holding size whose blocks are aligned to alignment.
+
+### function `full_mark`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::full_mark(void) noexcept -> void*;
+```
+
+The value of a span's remote list once its owner found it exhausted.
+
+### function `next_of`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::next_of(void* const block) noexcept -> void*&;
+```
+
+The link of a free block, in its first word.
+
+### function `usable_size`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::usable_size(const ca::usz size, const ca::usz alignment) noexcept -> ca::usz;
+```
+
+Bytes a large block of size holds: pages' usable_size, else size in whole ALIGNMENTs.
+
+### function `count_large`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::count_large(const ca::usz blocks, const ca::usz bytes) noexcept -> void;
+```
+
+Adds to the large-block counters (wrapping, to subtract).
+
+### function `count_new`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::count_new(const ca::result<ca::allocation>& block, const ca::usz alignment) noexcept -> void;
+```
+
+Counts a large block pages handed out, if it did.
+
+### function `count_moved`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::count_moved(const ca::allocation from, const ca::allocation to, const ca::usz alignment) noexcept -> void;
+```
+
+Counts a large block resized from from to to.
+
+### function `lock`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::lock(void) noexcept -> void;
+```
+
+Takes the pool's spin lock.
+
+### function `unlock`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::unlock(void) noexcept -> void;
+```
+
+Releases the pool's spin lock.
+
+### function `base_of`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::base_of(span* const target) noexcept -> char*;
+```
+
+The first byte of target's span.
+
+### function `link_front`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::link_front(state* const heap, span* const target) noexcept -> void;
+```
+
+Puts target first in its class's queue.
+
+### function `unlink`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::unlink(state* const heap, span* const target) noexcept -> void;
+```
+
+Takes target out of its class's queue.
+
+### function `release`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::release(state* const heap, span* const target) noexcept -> void;
+```
+
+An emptied span: kept as a spare while there is room, else back to pages.
+
+### function `fresh_span`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::fresh_span(state* const heap, const ca::u32 index) noexcept -> ca::result<span*>;
+```
+
+A span for class index of heap: a spare, else new from pages, its marks cleared.
+
+### function `collect`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::collect(span* const target, void* const list) noexcept -> void;
+```
+
+Takes back list, blocks of target other heaps freed.
+
+### function `carve`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::carve(span* const target) noexcept -> bool;
+```
+
+Links a page of target's untouched blocks into its free list; false when none is left.
+
+### function `local_free`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::local_free(span* const target, void* const block) noexcept -> void;
+```
+
+Frees block into target, by its owner.
+
+### function `remote_free`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::remote_free(span* const target, void* const block) noexcept -> void;
+```
+
+Frees block of target from another heap: onto the span's list, or its heap's once full.
+
+### function `take_pending`
+
+```c++
+template <typename Heap>
+auto ca::impl::heap_engine<Heap>::take_pending(state* const heap) noexcept -> void;
+```
+
+Frees the blocks other heaps sent heap.
+
+### function `allocate_from`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::allocate_from(state* const heap, const ca::u32 index) noexcept -> ca::result<ca::allocation>;
+```
+
+A block of class index: remote frees, else carving, else the next span or a new one.
+
+### function `acquire`
+
+```c++
+template <typename Heap>
+[[nodiscard]] auto ca::impl::heap_engine<Heap>::acquire(void) noexcept -> ca::result<state*>;
+```
+
+A heap for the calling context, idle or new, given to the binding.
+
+### function `_allocate`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+[[nodiscard, gnu::noinline]] auto ca::basic_heap<Pages, G, Binding>::_allocate(const ca::usz size, const ca::usz alignment) noexcept -> ca::result<ca::allocation>;
+```
+
+allocate past the fast path: size 0, large, the first block, an aligned class, a refill.
+
+### function `_deallocate`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+[[gnu::noinline]] auto ca::basic_heap<Pages, G, Binding>::_deallocate(const ca::allocation block, const ca::usz alignment) noexcept -> void;
+```
+
+deallocate past the fast path: size 0, large, an aligned class, another heap's block.
+
+### function `_settle`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+[[gnu::noinline]] auto ca::basic_heap<Pages, G, Binding>::_settle(span_type* const span) noexcept -> void;
+```
+
+After a free: a full span back in its queue, an emptied one released, the class's first span too once emptied and passed.
+
+### function `_check`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+auto ca::basic_heap<Pages, G, Binding>::_check(const span_type* const span, const ca::allocation block, const ca::usz alignment) noexcept -> void;
+```
+
+Debug: block starts a block of span, has its class, and is poisoned.
+
+### function `allocate_zeroed`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+[[nodiscard]] auto ca::basic_heap<Pages, G, Binding>::allocate_zeroed(const ca::usz size, const ca::usz alignment) const noexcept -> ca::result<ca::allocation>;
+```
+
+Large blocks from pages' allocate_zeroed, small ones filled.
+
+### function `expand`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+[[nodiscard]] auto ca::basic_heap<Pages, G, Binding>::expand(const ca::allocation block, const ca::usz size, const ca::usz alignment) const noexcept -> ca::optional<ca::allocation>;
+```
+
+Large to large through pages, small within the class.
+
+### function `reallocate`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+[[nodiscard]] auto ca::basic_heap<Pages, G, Binding>::reallocate(const ca::allocation block, const ca::usz size, const ca::usz alignment) const noexcept -> ca::result<ca::allocation>;
+```
+
+Large to large through pages, else expand, else move.
+
+### function `retire`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+auto ca::basic_heap<Pages, G, Binding>::retire(state_type* const heap) noexcept -> void;
+```
+
+Pending frees taken, empty spans released, the heap pooled.
+
+### function `statistics`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+[[nodiscard]] auto ca::basic_heap<Pages, G, Binding>::statistics(void) noexcept -> statistics_type
+requires (G::STATISTICS);
+```
+
+Every heap's counters under the pool lock, then the large ones.
+
 ## `memory/impl/heap_span.hpp`
 
 ### struct `impl::alignas`
 
 ```c++
+template <typename G>
 struct alignas(64) heap_span final;
 ```
 
-Header of a heap span: heap_span_size bytes aligned to their size, blocks of one class from the start, this header in the last bytes, so a block finds it by masking its address. The first line is the owner's alone. The second takes frees from other threads: a list of blocks, or heap_span_full once the owner found nothing left, frees then going to the owner's heap instead. A thread freeing a block touches the span no more after it.
+Header of a heap span: G::SPAN_SIZE bytes aligned to their size, blocks of one class from the start, this header in the last bytes, so a block finds it by masking its address. The first line is the owner's alone. The second takes frees from other threads: a list of blocks, or the full mark once the owner found nothing left, frees then going to the owner's heap instead. A thread freeing a block touches the span no more after it. With G::CHECK_DOUBLE_FREE, the marks of the blocks in use (a bit per 16 bytes) sit right below the header.
+
+### variable `impl::heap_mark_words`
+
+```c++
+template <typename G>
+inline constexpr ca::usz heap_mark_words = G::CHECK_DOUBLE_FREE ? G::SPAN_SIZE / 16U / 64U : 0U;
+```
+
+Words of block marks below a span's header: none without G::CHECK_DOUBLE_FREE.
+
+### variable `impl::heap_span_header`
+
+```c++
+template <typename G>
+inline constexpr ca::usz heap_span_header = G::SPAN_SIZE - sizeof(ca::impl::heap_span<G>);
+```
+
+Offset of the header in a span.
+
+### variable `impl::heap_blocks_end`
+
+```c++
+template <typename G>
+inline constexpr ca::usz heap_blocks_end = ca::impl::heap_span_header<G> - ca::impl::heap_mark_words<G> * sizeof(ca::u64);
+```
+
+Offset where blocks stop: the marks, else the header.
 
 ### function `impl::heap_span_of`
 
 ```c++
-[[nodiscard, gnu::always_inline]] inline auto heap_span_of(void* const block) noexcept -> ca::impl::heap_span*;
+template <typename G>
+[[nodiscard, gnu::always_inline]] inline auto heap_span_of(void* const block) noexcept -> ca::impl::heap_span<G>*;
 ```
 
 Header of the span holding block, a small heap block.
+
+### function `impl::heap_marks_of`
+
+```c++
+template <typename G>
+[[nodiscard, gnu::always_inline]] inline auto heap_marks_of(ca::impl::heap_span<G>* const span) noexcept -> ca::u64*;
+```
+
+The block marks of span.
+
+### function `impl::heap_mark_of`
+
+```c++
+template <typename G>
+[[nodiscard, gnu::always_inline]] inline auto heap_mark_of(const void* const block) noexcept -> ca::usz;
+```
+
+Index of block's mark: its offset in its span, in units of 16 bytes.
+
+### function `impl::heap_mark`
+
+```c++
+template <typename G>
+[[gnu::always_inline]] inline auto heap_mark(ca::impl::heap_span<G>* const span, const void* const block) noexcept -> void;
+```
+
+Marks block, of span, in use.
+
+### function `impl::heap_unmark`
+
+```c++
+template <typename G>
+[[gnu::always_inline]] inline auto heap_unmark(ca::impl::heap_span<G>* const span, const void* const block) noexcept -> void;
+```
+
+Clears block's mark; traps when block is not on a 16-byte boundary, or its mark was clear.
 
 ## `memory/impl/heap_state.hpp`
 
 ### struct `impl::heap_queues`
 
 ```c++
+template <typename G>
 struct heap_queues final;
 ```
 
-Per class, the first span with room left (or heap_empty_span), linked to the others.
+Per class, the first span with room left (or the empty span), linked to the others.
+
+### struct `impl::heap_counters`
+
+```c++
+template <typename G, bool = G::STATISTICS>
+struct heap_counters final;
+```
+
+A heap's counters with G::STATISTICS: per class, blocks in use and spans held; spare spans. Only the owner writes them, so a relaxed load and store do; anyone may read them.
 
 ### struct `impl::heap_state`
 
 ```c++
+template <typename G>
 struct heap_state final;
 ```
 
-A thread's heap. Spans whose blocks are all out leave their queue until one comes back. Heaps are never freed: an exiting thread returns its heap to a pool, the next new thread adopts it with its spans. _pending gathers blocks other threads freed into full spans.
+A heap: one per thread or per CPU, as its binding says. Spans whose blocks are all out leave their queue until one comes back. Heaps are never freed: a retired heap goes to a pool, the next new thread adopts it with its spans; every heap is on the _next_all list. _pending gathers blocks other threads freed into full spans.
 
-### variable `impl::heap_empty_span`
-
-```c++
-extern constinit ca::impl::heap_span heap_empty_span;
-```
-
-Span with nothing to give, queued in every empty class.
-
-### variable `impl::heap_empty_state`
+### function `impl::heap_empty_queues`
 
 ```c++
-extern constinit ca::impl::heap_state heap_empty_state;
+template <typename G>
+[[nodiscard]] consteval auto heap_empty_queues(ca::impl::heap_span<G>* const empty) noexcept -> ca::impl::heap_queues<G>;
 ```
 
-Heap of threads that have not allocated yet. Owns no span.
+Queues with every class on empty, the span with nothing to give.
 
-### variable `impl::heap_current`
-
-```c++
-extern constinit thread_local ca::impl::heap_state* heap_current;
-```
-
-The calling thread's heap.
+## `memory/impl/heap_traps.hpp`

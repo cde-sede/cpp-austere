@@ -11,7 +11,8 @@
            -Wl,--end-group -Wl,-u,_start
 
    1. _start (asm): the kernel leaves argc, argv, envp and the auxiliary vector on the stack;
-      rdi = that stack pointer, the stack aligned to 16, then start(), which never returns.
+      rdi = that stack pointer, the stack aligned to 16, then start(), which never returns. The
+      auxiliary vector is kept in syscall::impl::auxiliary_vector, for syscall::auxiliary.
    2. TLS (variant II, laid out by ca::sys::impl, thread/impl/tls, which threads ca starts
       share): the PT_TLS image found and kept in sys::impl::program_tls, copied below the
       thread pointer in fresh pages, the control block above it (stack canary from AT_RANDOM),
@@ -35,6 +36,7 @@
 #include "3-system/elf/program_header.hpp"
 #include "3-system/elf/relocation.hpp"
 #include "3-system/elf/symbol.hpp"
+#include "3-system/syscall/auxiliary.hpp"
 #include "3-system/syscall/impl/enter.hpp"
 #include "3-system/syscall/syscalls.hpp"
 #include "3-system/thread/impl/tls.hpp"
@@ -185,7 +187,9 @@ extern "C" [[noreturn, gnu::no_stack_protector, gnu::used]] auto ca_runtime_star
 	while (*end != nullptr)
 		++end;
 	environ = envp;
-	set_up_thread(reinterpret_cast<const ca::elf::auxiliary_entry*>(end + 1));
+	const auto* const auxv = reinterpret_cast<const ca::elf::auxiliary_entry*>(end + 1);
+	ca::syscall::impl::auxiliary_vector = auxv;
+	set_up_thread(auxv);
 	for (init_function* f = __preinit_array_start; f != __preinit_array_end; ++f)
 		(*f)(argc, argv, envp);
 	for (init_function* f = __init_array_start; f != __init_array_end; ++f)

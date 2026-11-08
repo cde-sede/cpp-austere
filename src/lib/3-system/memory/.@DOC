@@ -62,3 +62,5 @@ instance.
 `move_paths.hpp` exposes the strategies ca's memcpy and memmove take, one function per size class
 and instruction set (`ca::move_paths::bytes_0_to_15`, `forward`, `stream`, ...), each checking that
 the size is in its range; benchmarks and tests call them to measure or verify one path alone.
+The out-of-line ones (`forward` and after) need SSE2: an integer-only build has the inline size
+classes only.

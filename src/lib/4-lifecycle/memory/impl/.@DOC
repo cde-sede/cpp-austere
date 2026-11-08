@@ -2,21 +2,31 @@ The internals of `ca::heap` and `ca::arena`.
 
 ### Heap
 
-- `heap_classes.hpp`: the 48 size classes, 16 to 128 bytes by 16, then four per doubling up to
-  `heap_largest_class` (128 KiB). Every class is a multiple of 16. `heap_class_of(size)` is a shift
-  for small sizes and a `bit_width` above 128, always inlined: it sits on the allocation fast path.
-- `heap_span.hpp`: a span is 1 MiB aligned to its size, serving one class from its start, its
-  header in the last bytes, so `heap_span_of(block)` finds it by masking the block's address. The
-  header's first cache line belongs to the owning thread (its free list, its use count); the
-  second takes frees from other threads, as an atomic list, or the marker `heap_span_full` once
+Everything below is templated on the geometry `G` (`ca::is_heap_geometry`) of a
+`ca::basic_heap`; `ca::heap`'s is 1 MiB spans and classes up to 128 KiB.
+
+- `heap_classes.hpp`: up to 48 size classes, 16 to 128 bytes by 16, then four per doubling up to
+  `G::LARGEST_CLASS`. Every class is a multiple of 16. `heap_class_of(size)` is a shift for small
+  sizes and a `bit_width` above 128, always inlined: it sits on the allocation fast path.
+- `heap_span.hpp`: a span is `G::SPAN_SIZE` bytes aligned to its size, serving one class from
+  its start, its header in the last bytes, so `heap_span_of(block)` finds it by masking the
+  block's address. The header's first cache line belongs to the owning heap (its free list, its
+  use count); the second takes frees from other heaps, as an atomic list, or the full mark once
   the owner found the span exhausted, after which such frees go to the owner heap's `_pending`
-  list instead, so a foreign thread never touches a span the owner may release.
-- `heap_state.hpp`: one heap per thread (`heap_current`, `constinit thread_local`), holding per
-  class a queue of spans with room. Threads that have not allocated yet point at
-  `heap_empty_state`, whose classes all hold `heap_empty_span`, so the fast path has no null
-  check: the first allocation takes the slow path and builds a real heap. Heaps are never freed: a
-  thread's exit hands its heap to a pool (via a thread key, layer 3), and the next new thread
-  adopts it with its spans.
+  list instead, so a foreign thread never touches a span the owner may release. With
+  `G::CHECK_DOUBLE_FREE`, a bit per 16 bytes, right below the header, marks the blocks in use
+  (`heap_mark`, `heap_unmark`, which also traps on an address off a 16-byte boundary); frees from
+  other heaps are checked when the owner collects them.
+- `heap_state.hpp`: a heap, holding per class a queue of spans with room, and with
+  `G::STATISTICS` its counters (blocks in use and spans per class, spare spans), written by the
+  owner alone with relaxed stores. Contexts that have not allocated yet point at the heap's
+  `empty_state()`, whose classes all hold the empty span, so the fast path has no null check: the
+  first allocation takes the slow path, which builds a real heap and gives it to the binding.
+  Heaps are never freed: a retired one (`ca::heap`: a thread's exit, through a thread key) goes to
+  a pool, and the next new context adopts it with its spans.
+- `heap_engine.hpp`: the slow paths, the pool and the large-block counters of one instantiation,
+  internal to the translation unit that includes it and names the instantiation.
+- `heap_traps.hpp`: the named traps of the heap's checks.
 
 ### Arena
 

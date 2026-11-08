@@ -3,12 +3,15 @@
    version printed by trying %.15g, %.16g, %.17g (%.6g ... %.9g) until strtod read the value
    back, since a correctly rounded %.Ng is the shortest form whenever N digits suffice. */
 
+#include "1-primitives/config/architecture.hpp"
 #include "1-primitives/floats/impl/shortest_decimal.hpp"
 #include "1-primitives/integers/i64.hpp"
 #include "1-primitives/integers/u32.hpp"
 #include "1-primitives/integers/u64.hpp"
 #include "3-system/text/format_float_shortest.hpp"
 #include "3-system/text/impl/float_text.hpp"
+
+#if ca_target_feature(floats)
 
 
 static auto put_shortest(const ca::span<char> buffer, const bool negative, ca::impl::decimal_float decimal, const ca::i64 minimum) noexcept -> ca::usz {
@@ -69,3 +72,5 @@ auto ca::sys::format_float_shortest(const ca::span<char> buffer, const ca::f32 v
 		return put_simple(buffer, negative, value == 0.0F, value == value);
 	return put_shortest(buffer, negative, ca::impl::shortest_decimal(value), 6);
 }
+
+#endif

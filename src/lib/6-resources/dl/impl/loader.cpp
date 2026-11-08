@@ -440,7 +440,7 @@ namespace {
 
 	/* The object for name, needed by requester (null for the root): one already loaded under
 	   that soname, the file at name when it has a slash, else the first usable file found in
-	   requester's DT_RPATH (without DT_RUNPATH), LD_LIBRARY_PATH (unless secure), DT_RUNPATH,
+	   requester's DT_RPATH (without DT_RUNPATH), LD_LIBRARY_PATH (unless secure or secure unknown), DT_RUNPATH,
 	   then the default directories. */
 	[[nodiscard]] auto acquire(const ca::sv::str name, const object* const requester, session& s) noexcept -> ca::result<object*, ca::report<>> {
 
@@ -459,7 +459,7 @@ namespace {
 		ca::sv::str lists[4] = {};
 		if (runpath.empty())
 			lists[0] = search_list(requester, ca::elf::dynamic_tags::rpath);
-		if (ca::syscall::auxiliary(ca::elf::auxiliary_types::secure) == 0U) {
+		if (ca::syscall::auxiliary(ca::elf::auxiliary_types::secure).value_or(1U) == 0U) {
 			const auto environment = ca::sys::getenv("LD_LIBRARY_PATH");
 			if (environment)
 				lists[1] = *environment;

@@ -1,3 +1,4 @@
+#include "1-primitives/config/architecture.hpp"
 #include "1-primitives/floats/f32.hpp"
 #include "1-primitives/floats/f64.hpp"
 #include "1-primitives/integers/i64.hpp"
@@ -33,7 +34,6 @@ static constexpr char digit_pairs[] =
 	"8081828384858687888990919293949596979899";
 static constexpr char lower_digits[] = "0123456789abcdef";
 static constexpr char upper_digits[] = "0123456789ABCDEF";
-static constexpr ca::usz float_capacity = 512U;
 static constexpr ca::usz no_limit = ~ca::usz{0U};
 static constexpr ca::usz transcode_capacity = 256U;
 
@@ -414,6 +414,10 @@ static auto error_text(const ca::error error) noexcept -> ca::sv::str {
 	return ca::sys::error_message(error);
 }
 
+#if ca_target_feature(floats)
+
+static constexpr ca::usz float_capacity = 512U;
+
 static auto render_float(ca::text_writer& out, const ca::impl::format_spec& spec, const ca::f64 value, const ca::u8 size) noexcept -> void {
 
 	char text[float_capacity];
@@ -432,6 +436,8 @@ static auto render_float(ca::text_writer& out, const ca::impl::format_spec& spec
 	const bool numeric = length != 0U && body[0] >= '0' && body[0] <= '9';
 	emit(out, spec, '>', &sign, sign != '\0' ? 1U : 0U, 0U, body, length, length, numeric);
 }
+
+#endif
 
 static auto render_argument(ca::text_writer& out, const ca::impl::format_spec& spec, const ca::impl::display_argument& argument) noexcept -> void {
 	switch (argument._kind) {
@@ -472,7 +478,9 @@ static auto render_argument(ca::text_writer& out, const ca::impl::format_spec& s
 				render_integer(out, spec, false, argument._unsigned_value);
 			break;
 		case ca::impl::display_kind::floating:
+#if ca_target_feature(floats)
 			render_float(out, spec, argument._float_value, argument._size);
+#endif
 			break;
 		case ca::impl::display_kind::string:
 			if (spec._type == 'p')

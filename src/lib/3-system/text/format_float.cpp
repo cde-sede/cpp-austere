@@ -4,12 +4,15 @@
    the same way, a carry making the leading digit 2 as glibc does. %g picks its style from the
    %e exponent after rounding to the precision, then rounds again in that style, as C requires. */
 
+#include "1-primitives/config/architecture.hpp"
 #include "1-primitives/floats/impl/exact_decimal.hpp"
 #include "1-primitives/integers/i64.hpp"
 #include "1-primitives/integers/u32.hpp"
 #include "1-primitives/integers/u64.hpp"
 #include "3-system/text/format_float.hpp"
 #include "3-system/text/impl/float_text.hpp"
+
+#if ca_target_feature(floats)
 
 
 // -- CA NAMESPACE -----------------------------------------------------------
@@ -194,3 +197,5 @@ auto ca::sys::format_float(const ca::span<char> buffer, const ca::f64 value, con
 	}
 	return ca::sys::impl::finish(sink);
 }
+
+#endif

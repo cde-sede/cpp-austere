@@ -102,3 +102,60 @@ lock and no atomic. A block finds its span by masking its address, so there is n
 header. Any thread may free any block; one freed away from its owner goes back with a single
 atomic operation. Larger sizes are mapped pages, and growing them remaps without copying. The
 performance notes of `heap.hpp` give the costs per operation.
+
+`ca::heap` is one instantiation of `ca::basic_heap<Pages, G, Binding>`, the same engine with
+its three dependencies as parameters, for code where mmap and threads are not the right ones
+(a kernel: frames for pages, one heap per CPU, interrupts off while a heap is touched):
+
+| Parameter | ca::heap | Role |
+|---|---|---|
+| `Pages` | `ca::page_allocator` | stateless allocator of spans (aligned to their size), large blocks, heap states |
+| `G` | `ca::heap_geometry` | `ca::is_heap_geometry`: span size, largest class, spare spans, state chunk, `STATISTICS`, `CHECK_DOUBLE_FREE` |
+| `Binding` | `ca::heap_thread_binding` | where the current heap is (`current`), what keeps others off it (`pin`, `unpin`), how a new one is installed (`adopt`) |
+
+The fast paths are in `basic_heap.hpp`; the rest is in `impl/heap_engine.hpp`, which only the
+translation unit instantiating the heap includes. With `STATISTICS`, `statistics()` sums every
+heap's counters: blocks in use and spans per class, spare spans, large blocks and their bytes.
+With `CHECK_DOUBLE_FREE`, a bit per 16 bytes of each span marks the blocks in use, and a block
+freed twice, or an address off a 16-byte boundary, traps, in every build.
+
+```c++
+#include "ca/memory.hpp"
+#include "4-lifecycle/memory/impl/heap_engine.hpp"
+
+struct small_spans final {
+	static constexpr ca::usz SPAN_SIZE = 65536U;
+	static constexpr ca::usz LARGEST_CLASS = 2048U;
+	static constexpr ca::u32 SPARE_SPANS = 0U;
+	static constexpr ca::usz STATE_CHUNK = 4096U;
+	static constexpr bool STATISTICS = true;
+	static constexpr bool CHECK_DOUBLE_FREE = true;
+};
+
+template <typename Heap>
+struct one_heap final {
+	using state = typename Heap::state_type;
+	static constinit inline state* _current = Heap::empty_state();
+	struct token final {
+	};
+	static auto current(void) noexcept -> state* { return _current; }
+	static auto pin(void) noexcept -> token { return token{}; }
+	static auto unpin(token) noexcept -> void {}
+	static auto adopt(state* const heap) noexcept -> void { _current = heap; }
+};
+
+using my_heap = ca::basic_heap<ca::page_allocator, small_spans, one_heap>;
+template class ca::basic_heap<ca::page_allocator, small_spans, one_heap>;
+
+auto main(void) -> int {
+	const my_heap heap{};
+	auto block = heap.allocate(100U, 8U);
+	if (!block || block->size() != 112U)
+		return 1;
+	const auto held = my_heap::statistics();
+	if (held.small_blocks() != 1U || held.small_bytes() != 112U)
+		return 2;
+	heap.deallocate(*block, 8U);
+	return my_heap::statistics().small_blocks() == 0U ? 0 : 3;
+}
+```

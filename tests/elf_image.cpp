@@ -22,7 +22,7 @@ constexpr ca::elf::relocation global_data{0U, (ca::u64{7U} << 32U) | ca::elf::x8
 static_assert(global_data.symbol() == 7U && global_data.type() == ca::elf::x86_64_relocations::global_data);
 
 static auto vdso(void) noexcept -> int {
-	const ca::u64 base = ca::syscall::auxiliary(ca::elf::auxiliary_types::vdso);
+	const ca::u64 base = ca::syscall::auxiliary(ca::elf::auxiliary_types::vdso).value_or(0U);
 	if (base == 0U)
 		return 0;
 	const auto image = ca::elf::image::at(*reinterpret_cast<const ca::elf::file_header*>(base));
@@ -62,8 +62,8 @@ static auto image_has_phdr(const ca::borrowed_slice<const ca::elf::program_heade
 }
 
 static auto program(void) noexcept -> int {
-	const ca::u64 table = ca::syscall::auxiliary(ca::elf::auxiliary_types::program_headers);
-	const ca::u64 count = ca::syscall::auxiliary(ca::elf::auxiliary_types::program_header_count);
+	const ca::u64 table = ca::syscall::auxiliary(ca::elf::auxiliary_types::program_headers).value_or(0U);
+	const ca::u64 count = ca::syscall::auxiliary(ca::elf::auxiliary_types::program_header_count).value_or(0U);
 	if (table == 0U || count == 0U)
 		return 10;
 	const ca::borrowed_slice<const ca::elf::program_header> segments{reinterpret_cast<const ca::elf::program_header*>(table), static_cast<ca::usz>(count)};

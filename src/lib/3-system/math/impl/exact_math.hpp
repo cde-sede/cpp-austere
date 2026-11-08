@@ -3,7 +3,7 @@
    others to when no instruction does it. Each is a template instantiated for float, double and
    long double (x87 80-bit), behaving as glibc's: the same results, NaNs included, and errno set
    as glibc does (ca's last error). Transcendental functions (exp, sin, ...) are not exact and
-   are not here. Linux x86-64 only. */
+   are not here. Linux x86-64 only, and absent from an integer-only build (no SSE2). */
 #ifndef ca_system_math_impl_exact_math_hpp
 #define ca_system_math_impl_exact_math_hpp
 

@@ -60,12 +60,27 @@ namespace ca {
 				return self::min();
 			}
 
+			/* @DOC Each floating-point accessor names long double only in its last branch, and
+			   there only through T, so float and double stay usable where the target refuses
+			   long double (x86-64 under -mgeneral-regs-only). */
 			static consteval auto min(void) noexcept -> T requires ca::is_floating_point<T> {
-				return self::_pick(__FLT_MIN__, __DBL_MIN__, __LDBL_MIN__);
+
+				if constexpr (self::_is<float>)
+					return __FLT_MIN__;
+				else if constexpr (self::_is<double>)
+					return __DBL_MIN__;
+				else
+					return __LDBL_MIN__;
 			}
 
 			static consteval auto max(void) noexcept -> T requires ca::is_floating_point<T> {
-				return self::_pick(__FLT_MAX__, __DBL_MAX__, __LDBL_MAX__);
+
+				if constexpr (self::_is<float>)
+					return __FLT_MAX__;
+				else if constexpr (self::_is<double>)
+					return __DBL_MAX__;
+				else
+					return __LDBL_MAX__;
 			}
 
 			static consteval auto lowest(void) noexcept -> T requires ca::is_floating_point<T> {
@@ -73,31 +88,38 @@ namespace ca {
 			}
 
 			static consteval auto epsilon(void) noexcept -> T requires ca::is_floating_point<T> {
-				return self::_pick(__FLT_EPSILON__, __DBL_EPSILON__, __LDBL_EPSILON__);
+
+				if constexpr (self::_is<float>)
+					return __FLT_EPSILON__;
+				else if constexpr (self::_is<double>)
+					return __DBL_EPSILON__;
+				else
+					return __LDBL_EPSILON__;
 			}
 
 			static consteval auto infinity(void) noexcept -> T requires ca::is_floating_point<T> {
-				return self::_pick(__builtin_huge_valf(), __builtin_huge_val(), __builtin_huge_vall());
+
+				if constexpr (self::_is<float>)
+					return __builtin_huge_valf();
+				else
+					return static_cast<T>(__builtin_huge_val());
 			}
 
 			static consteval auto quiet_nan(void) noexcept -> T requires ca::is_floating_point<T> {
-				return self::_pick(__builtin_nanf(""), __builtin_nan(""), __builtin_nanl(""));
+
+				if constexpr (self::_is<float>)
+					return __builtin_nanf("");
+				else
+					return static_cast<T>(__builtin_nan(""));
 			}
 
 
 		private:
 
-			// -- private methods --------------------------------------------
+			// -- private constants ------------------------------------------
 
-			static consteval auto _pick(const float f, const double d, const long double l) noexcept -> T {
-
-				if constexpr (ca::is_same<ca::remove_cv<T>, float>)
-					return f;
-				else if constexpr (ca::is_same<ca::remove_cv<T>, double>)
-					return d;
-				else
-					return l;
-			}
+			template <typename U>
+			static constexpr bool _is = ca::is_same<ca::remove_cv<T>, U>;
 
 	}; // struct limits
 

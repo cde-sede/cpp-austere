@@ -2728,7 +2728,7 @@ template <typename T>
 concept is_displayable = ca::impl::display_kind_of<T> != ca::impl::display_kind::none;
 ```
 
-Whether print and printf take a T: bool, char, standard integers, enums (as their integer), f32, f64, C strings and char arrays, string views (ca::sv) and types with `view() -> sv::basic<C>` (fs::path, ca::str), ca::error (the message its trace started with, else its ca::errc name, else the system's text; `{:d}` the code), object pointers, nullptr, and types with `display(ca::text_writer&) const`.
+Whether print and printf take a T: bool, char, standard integers, enums (as their integer), f32, f64, C strings and char arrays, string views (ca::sv) and types with `view() -> sv::basic<C>` (fs::path, ca::str), ca::error (the message its trace started with, else its ca::errc name, else the system's text; `{:d}` the code), object pointers, nullptr, and types with `display(ca::text_writer&) const`. f32 and f64 are not in an integer-only build (ca_target_feature(floats) 0).
 
 ## `format/located_format_string.hpp`
 
@@ -6179,7 +6179,7 @@ The two structures under the maps, and what they share.
 
 ### Swiss table (`hashmap`, `set`)
 
-- `control_group.hpp`: the group of control bytes, one per slot, matched together: `vector_group.hpp` on x86-64 (16 bytes, one SSE2 compare and pmovmskb through `ca::simd`), `swar_group.hpp` elsewhere (8 bytes in a 64-bit word, portable, no vector unit needed). A full slot holds the low 7 bits of its key's hash; EMPTY and DELETED have the high bit set. `match(tag)` returns the slots whose tag is equal, so a lookup compares a key only on a tag hit, about 1 in 128 slots. Both give the same interface (`WIDTH`, `SHIFT`, `bits`, `first`, `from`), so the table is written once. `empty_control` is one shared group of EMPTY bytes that every table without storage points at, so lookups need no branch for the empty case.
+- `control_group.hpp`: the group of control bytes, one per slot, matched together: `vector_group.hpp` on x86-64 (16 bytes, one SSE2 compare and pmovmskb through `ca::simd`), `swar_group.hpp` elsewhere and in an integer-only build (8 bytes in a 64-bit word, portable, no vector unit needed). A full slot holds the low 7 bits of its key's hash; EMPTY and DELETED have the high bit set. `match(tag)` returns the slots whose tag is equal, so a lookup compares a key only on a tag hit, about 1 in 128 slots. Both give the same interface (`WIDTH`, `SHIFT`, `bits`, `first`, `from`), so the table is written once. `empty_control` is one shared group of EMPTY bytes that every table without storage points at, so lookups need no branch for the empty case.
 - `hash_table.hpp`: the table itself, over slots of any type: one block holding the control bytes then the slots, power-of-two capacity, at most 7/8 full, triangular probing over aligned groups. `hashmap` stores `item<K, V>` in the slots, `set` stores K.
 
 ### B-tree (`map`)
@@ -6277,7 +6277,7 @@ Shows a map entry as its value.
 using control_group = ca::impl::vector_group;
 ```
 
-The control group of the hash tables on this CPU: 16 bytes in an SSE2 vector on x86-64, 8 in a 64-bit word (SWAR) elsewhere.
+The control group of the hash tables on this CPU: 16 bytes in an SSE2 vector on x86-64, 8 in a 64-bit word (SWAR) elsewhere and in an integer-only build.
 
 ### variable `impl::?`
 

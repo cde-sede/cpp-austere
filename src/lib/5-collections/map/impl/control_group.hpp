@@ -19,10 +19,10 @@ namespace ca {
 
 		// -- CONTROL GROUP --------------------------------------------------
 
-#if ca_architecture(x86_64)
+#if ca_architecture(x86_64) && ca_target_feature(sse2)
 
 		/* @DOC The control group of the hash tables on this CPU: 16 bytes in an SSE2 vector on
-		   x86-64, 8 in a 64-bit word (SWAR) elsewhere. */
+		   x86-64, 8 in a 64-bit word (SWAR) elsewhere and in an integer-only build. */
 		using control_group = ca::impl::vector_group;
 
 #else

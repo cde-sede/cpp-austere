@@ -1,6 +1,7 @@
 #ifndef ca_collections_format_impl_display_kind_hpp
 #define ca_collections_format_impl_display_kind_hpp
 
+#include "1-primitives/config/architecture.hpp"
 #include "1-primitives/integers/u8.hpp"
 #include "1-primitives/integers/usz.hpp"
 #include "1-primitives/traits/decay.hpp"
@@ -95,7 +96,7 @@ namespace ca {
 				return ca::impl::display_kind::signed_integer;
 			else if constexpr (ca::impl::is_any_of<T, unsigned char, unsigned short, unsigned int, unsigned long, unsigned long long>)
 				return ca::impl::display_kind::unsigned_integer;
-			else if constexpr (ca::impl::is_any_of<T, float, double>)
+			else if constexpr (ca::impl::is_any_of<T, float, double> && ca_target_feature(floats))
 				return ca::impl::display_kind::floating;
 			else if constexpr (ca::is_enum<T>)
 				return ca::impl::classify<ca::underlying_type<T>>();

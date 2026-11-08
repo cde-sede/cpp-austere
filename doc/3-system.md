@@ -73,7 +73,7 @@ The dynamic section's addresses are link-time addresses in the file, but libc's 
 #include "ca/syscall.hpp"
 
 auto main(void) -> int {
-	const ca::u64 base = ca::syscall::auxiliary(ca::elf::auxiliary_types::vdso);
+	const ca::u64 base = ca::syscall::auxiliary(ca::elf::auxiliary_types::vdso).value_or(0U);
 	if (base == 0U)
 		return 0;
 	const auto vdso = ca::elf::image::at(*reinterpret_cast<const ca::elf::file_header*>(base));
@@ -2410,7 +2410,7 @@ Each gives glibc 2.39's result bit for bit, NaN payloads included, in every roun
 
 ## `math/impl/exact_math.hpp`
 
-The functions of libm whose result IEEE 754 fixes to the bit, without libm: what libca_runtime's fmod, floor, sqrt, ... are, and what compilers lower __builtin_fmod and the others to when no instruction does it. Each is a template instantiated for float, double and long double (x87 80-bit), behaving as glibc's: the same results, NaNs included, and errno set as glibc does (ca's last error). Transcendental functions (exp, sin, ...) are not exact and are not here. Linux x86-64 only.
+The functions of libm whose result IEEE 754 fixes to the bit, without libm: what libca_runtime's fmod, floor, sqrt, ... are, and what compilers lower __builtin_fmod and the others to when no instruction does it. Each is a template instantiated for float, double and long double (x87 80-bit), behaving as glibc's: the same results, NaNs included, and errno set as glibc does (ca's last error). Transcendental functions (exp, sin, ...) are not exact and are not here. Linux x86-64 only, and absent from an integer-only build (no SSE2).
 
 ### function `impl::fmod`
 
@@ -2683,7 +2683,7 @@ auto main(void) -> int {
 
 `sys::mallocarray(count, size)` and `sys::reallocarray(block, count, size)` allocate with the multiplication checked for overflow, aligned to `malloc_alignment`; `sys::free` releases (nullptr does nothing). They exist for blocks that cross into C code, `realpath`'s result for instance.
 
-`move_paths.hpp` exposes the strategies ca's memcpy and memmove take, one function per size class and instruction set (`ca::move_paths::bytes_0_to_15`, `forward`, `stream`, ...), each checking that the size is in its range; benchmarks and tests call them to measure or verify one path alone.
+`move_paths.hpp` exposes the strategies ca's memcpy and memmove take, one function per size class and instruction set (`ca::move_paths::bytes_0_to_15`, `forward`, `stream`, ...), each checking that the size is in its range; benchmarks and tests call them to measure or verify one path alone. The out-of-line ones (`forward` and after) need SSE2: an integer-only build has the inline size classes only.
 
 ## `memory/advice.hpp`
 
@@ -4374,10 +4374,18 @@ At most six syscall arguments, the kernel's limit.
 ### function `auxiliary`
 
 ```c++
-[[nodiscard]] auto auxiliary(ca::u64 type) noexcept -> ca::u64;
+[[nodiscard]] auto auxiliary(ca::u64 type) noexcept -> ca::optional<ca::u64>;
 ```
 
-Value of entry type (elf::auxiliary_types) of the auxiliary vector the kernel handed the process, 0 when absent. Read from /proc/self/auxv at each call: for one-time lookups (the vDSO). Linux x86-64; 0 elsewhere.
+Value of entry type (elf::auxiliary_types) of the auxiliary vector the kernel handed the process. Read from the vector itself when libca_runtime's _start kept it (impl::auxiliary_vector), else from /proc/self/auxv at each call: for one-time lookups (the vDSO). None when the vector has no such entry or cannot be read (no /proc), which a caller cannot tell apart: one deciding something security-related (secure) treats none as the restrictive answer. Linux x86-64; none elsewhere.
+
+### variable `impl::auxiliary_vector`
+
+```c++
+extern constinit const ca::elf::auxiliary_entry* auxiliary_vector;
+```
+
+The vector on the initial stack, past the environment, set by libca_runtime's _start before anything runs; null in a program started by libc.
 
 ## `syscall/invoke.hpp`
 
@@ -4499,7 +4507,7 @@ static_assert(!ca::syscall::has_table || ca::syscall::number::write == 1);
 namespace number;
 ```
 
-Syscall numbers of linux x86_64 implemented by kernel 7.0.0-38-generic.
+Syscall numbers of linux x86_64 implemented by kernel 7.0.0-42-generic.
 
 ### function `read`
 
@@ -7498,7 +7506,7 @@ auto main(void) -> int {
 auto format_float(ca::span<char> buffer, ca::f64 value, char conversion, ca::sint precision, bool alternate) noexcept -> ca::usz;
 ```
 
-Writes value as printf's %\<conversion> would (conversion one of f F e E g G a A), with precision when >= 0 and the # flag when alternate; no width, no + flag, into buffer. Returns the length, at most buffer.size() - 1, and NUL-terminates (buffer not empty). Exact digits, ties to even; always '.' as the decimal point.
+Writes value as printf's %\<conversion> would (conversion one of f F e E g G a A), with precision when >= 0 and the # flag when alternate; no width, no + flag, into buffer. Returns the length, at most buffer.size() - 1, and NUL-terminates (buffer not empty). Exact digits, ties to even; always '.' as the decimal point. Not defined in an integer-only build (ca_target_feature(floats) 0).
 
 ## `text/format_float_shortest.hpp`
 
@@ -7508,7 +7516,7 @@ Writes value as printf's %\<conversion> would (conversion one of f F e E g G a A
 auto format_float_shortest(ca::span<char> buffer, ca::f64 value) noexcept -> ca::usz;
 ```
 
-Writes the fewest %g digits that read back as the same value: 0.1 is "0.1", not "0.10000000000000001"; an f32 round-trips as f32. Into buffer; returns the length, at most buffer.size() - 1, and NUL-terminates (buffer not empty). Ryu: a few 128-bit products, laid out as %.Pg with P = max(digits, 15) (f32: 6).
+Writes the fewest %g digits that read back as the same value: 0.1 is "0.1", not "0.10000000000000001"; an f32 round-trips as f32. Into buffer; returns the length, at most buffer.size() - 1, and NUL-terminates (buffer not empty). Ryu: a few 128-bit products, laid out as %.Pg with P = max(digits, 15) (f32: 6). Not defined in an integer-only build (ca_target_feature(floats) 0).
 
 ## `text/parse_integer.hpp`
 

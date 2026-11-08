@@ -7,7 +7,7 @@ does with `RTLD_NOW | RTLD_LOCAL`:
   protection it asks for, the zero-filled tail of a segment included;
 - loads what it needs (DT_NEEDED), breadth first: a name with a slash is a path, any other is
   first matched against the DT_SONAME of what is loaded, then searched for in the requester's
-  DT_RPATH (when it has no DT_RUNPATH), LD_LIBRARY_PATH (not in a setuid program), DT_RUNPATH,
+  DT_RPATH (when it has no DT_RUNPATH), LD_LIBRARY_PATH (not in a setuid program, nor when AT_SECURE cannot be read), DT_RUNPATH,
   and `/lib/x86_64-linux-gnu`, `/usr/lib/x86_64-linux-gnu`, `/lib64`, `/usr/lib64`, `/lib`,
   `/usr/lib`; `$ORIGIN` is the requester's directory; files of another class or machine are
   skipped;

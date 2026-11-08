@@ -24,7 +24,8 @@ namespace ca::impl {
 	/* @DOC The compare_bytes variant of this CPU, picked by cpuid on the first call as
 	   move_bytes_variant. x86-64: SSE2 or AVX2 with BMI2; below one vector a masked compare,
 	   up to 8 vectors overlapping, more with a 4-vector loop; the first difference by bit scan.
-	   Calls no libc. On x86-64 the library defines the C memcmp as one jump through it. */
+	   An integer-only build compares 64-bit words, the first difference by byte swap. Calls no
+	   libc. On x86-64 the library defines the C memcmp as one jump through it. */
 	extern ca::atomic<ca::impl::compare_bytes_function> compare_bytes_variant;
 
 
@@ -35,7 +36,7 @@ namespace ca::impl {
 	   bcmp as one jump through it. */
 	extern ca::atomic<ca::impl::compare_bytes_function> differ_bytes_variant;
 
-#if ca_architecture(x86_64)
+#if ca_architecture(x86_64) && ca_target_feature(sse2)
 
 	/* @DOC The variants compare_bytes_variant and differ_bytes_variant pick from, for tests:
 	   every x86-64 CPU runs the sse2 ones, the avx2 ones need AVX2 and BMI2. */

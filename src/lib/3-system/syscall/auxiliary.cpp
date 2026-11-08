@@ -8,14 +8,23 @@
 #include <fcntl.h>
 
 
-[[nodiscard]] auto ca::syscall::auxiliary(const ca::u64 type) noexcept -> ca::u64 {
+constinit const ca::elf::auxiliary_entry* ca::syscall::impl::auxiliary_vector = nullptr;
+
+[[nodiscard]] auto ca::syscall::auxiliary(const ca::u64 type) noexcept -> ca::optional<ca::u64> {
 
 #if ca_platform(linux) && ca_architecture(x86_64)
+	if (const ca::elf::auxiliary_entry* entry = ca::syscall::impl::auxiliary_vector) {
+		for (; entry->_type != ca::elf::auxiliary_types::null; ++entry) {
+			if (entry->_type == type)
+				return ca::optional<ca::u64>{entry->_value};
+		}
+		return ca::optional<ca::u64>{};
+	}
 	const auto fd = ca::syscall::restarting([] {
 		return ca::syscall::openat(AT_FDCWD, "/proc/self/auxv", O_RDONLY | O_CLOEXEC, 0);
 	});
 	if (!fd) [[unlikely]]
-		return 0U;
+		return ca::optional<ca::u64>{};
 	ca::elf::auxiliary_entry entries[64] = {};
 	ca::usz filled = 0U;
 	for (;;) {
@@ -31,11 +40,11 @@
 		if (entries[i]._type == ca::elf::auxiliary_types::null)
 			break;
 		if (entries[i]._type == type)
-			return entries[i]._value;
+			return ca::optional<ca::u64>{entries[i]._value};
 	}
-	return 0U;
+	return ca::optional<ca::u64>{};
 #else
 	static_cast<void>(type);
-	return 0U;
+	return ca::optional<ca::u64>{};
 #endif
 }

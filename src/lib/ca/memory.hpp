@@ -36,7 +36,6 @@
 #include "4-lifecycle/memory/is_allocator_aware.hpp"
 #include "4-lifecycle/memory/is_stateful_allocator.hpp"
 #include "4-lifecycle/memory/libc_allocator.hpp"
-#include "4-lifecycle/memory/page_allocator.hpp"
 #include "4-lifecycle/memory/reallocate_n.hpp"
 
 #endif // ca_include_memory_hpp
