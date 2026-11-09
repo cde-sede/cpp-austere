@@ -32,6 +32,8 @@
 		case ca::errc::not_empty.code():        return "not_empty";
 		case ca::errc::symlink_loop.code():     return "symlink_loop";
 		case ca::errc::not_supported.code():    return "not_supported";
+		case ca::errc::address_family_not_supported.code(): return "address_family_not_supported";
+		case ca::errc::connection_refused.code(): return "connection_refused";
 		case ca::errc::not_implemented.code():  return "not_implemented";
 		case ca::errc::timed_out.code():        return "timed_out";
 		case ca::errc::not_recoverable.code():  return "not_recoverable";

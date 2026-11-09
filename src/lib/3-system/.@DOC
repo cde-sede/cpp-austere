@@ -2,8 +2,8 @@ Layer 3: the boundary with the operating system. Everything ca needs from the ke
 library passes through here, and only here.
 
 - `ca::sys`: one thin wrapper per POSIX call (files, directories, processes, signals, pipes,
-  memory mappings, time, environment, machine information), each returning a `ca::result`
-  instead of -1 and errno.
+  UDP sockets, memory mappings, time, environment, machine information), each returning a
+  `ca::result` instead of -1 and errno.
 - `ca::syscall`: the raw kernel entry points, from a table generated on the build machine, which
   `ca::sys` uses instead of libc wherever a table exists.
 - `ca::errc`: the errno codes as `ca::error` constants, with their names and messages.

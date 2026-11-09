@@ -14,6 +14,7 @@ these; application code normally uses those instead.
 | `sys::madvise(region, advice)` | `normal`, `random`, `sequential`, `will_need`, `dont_need` |
 | `sys::msync(mapping)` | writes a shared file mapping back and waits |
 | `sys::munmap(mapping)` | unmaps a mapping, or some pages of one |
+| `sys::shm_create(size)`, `shm_attach(id, size)`, `shm_detach(mapping)`, `shm_remove(id)` | a System V shared memory segment, as X11's MIT-SHM shares with the X server |
 
 A mapping is a `span<byte>`: functions return one and take one, so the size always travels with
 the address. Regions must be page-aligned; an unaligned one fails with

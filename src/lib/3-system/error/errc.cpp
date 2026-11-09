@@ -31,6 +31,8 @@ static_assert(ca::errc::name_too_long.code() == ENAMETOOLONG);
 static_assert(ca::errc::not_empty.code() == ENOTEMPTY);
 static_assert(ca::errc::symlink_loop.code() == ELOOP);
 static_assert(ca::errc::not_supported.code() == ENOTSUP);
+static_assert(ca::errc::address_family_not_supported.code() == EAFNOSUPPORT);
+static_assert(ca::errc::connection_refused.code() == ECONNREFUSED);
 static_assert(ca::errc::not_implemented.code() == ENOSYS);
 static_assert(ca::errc::timed_out.code() == ETIMEDOUT);
 static_assert(ca::errc::not_recoverable.code() == ENOTRECOVERABLE);

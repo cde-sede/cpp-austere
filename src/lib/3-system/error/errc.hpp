@@ -46,6 +46,8 @@ namespace ca {
 		inline constexpr ca::error not_empty{39};
 		inline constexpr ca::error symlink_loop{40};
 		inline constexpr ca::error not_supported{95};
+		inline constexpr ca::error address_family_not_supported{97};
+		inline constexpr ca::error connection_refused{111};
 		inline constexpr ca::error not_implemented{38};
 		inline constexpr ca::error timed_out{110};
 		inline constexpr ca::error not_recoverable{131};
@@ -55,6 +57,8 @@ namespace ca {
 		inline constexpr ca::error not_empty{66};
 		inline constexpr ca::error symlink_loop{62};
 		inline constexpr ca::error not_supported{45};
+		inline constexpr ca::error address_family_not_supported{47};
+		inline constexpr ca::error connection_refused{61};
 		inline constexpr ca::error not_implemented{78};
 		inline constexpr ca::error timed_out{60};
 		inline constexpr ca::error not_recoverable{104};

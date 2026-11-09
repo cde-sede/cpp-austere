@@ -27,6 +27,7 @@
 #include "3-system/memory/munmap.hpp"
 #include "3-system/memory/page_size.hpp"
 #include "3-system/memory/protection.hpp"
+#include "3-system/memory/shared_segment.hpp"
 #include "4-lifecycle/memory/allocate_n.hpp"
 #include "4-lifecycle/memory/allocate_zeroed.hpp"
 #include "4-lifecycle/memory/arena.hpp"

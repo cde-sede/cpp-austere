@@ -1,0 +1,40 @@
+IPv4 UDP sockets (datagrams between endpoints) and Unix stream connections, on raw syscalls on
+Linux x86-64 and libc elsewhere. Sockets are plain descriptors, closed with `sys::close`.
+
+| Function | Does |
+|---|---|
+| `sys::udp_socket(flags)` | a new IPv4 UDP socket; flags from `ca::fs` (cloexec, nonblock) as for `sys::pipe` |
+| `sys::bind(fd, endpoint)` | gives the socket its local endpoint; port 0 lets the system pick |
+| `sys::local_endpoint(fd)` | the endpoint the socket is bound to |
+| `sys::send_to(fd, bytes, endpoint)` | sends one datagram |
+| `sys::receive_from(fd, buffer)` | receives one datagram, as a `datagram` (`size`, `truncated`, `from`) |
+| `sys::unix_connect(path, flags)` | a Unix stream socket connected to path (`'\0'` first: abstract name); then `read`, `write_all`, `poll` |
+
+`ipv4_endpoint` is an address and a port in host order: `ipv4_endpoint{127, 0, 0, 1, 8000}`,
+`ipv4_endpoint::loopback(port)`, `ipv4_endpoint::any(port)`; `address()`, `octet(i)`, `port()`.
+On a nonblocking socket, `send_to` with a full buffer and `receive_from` with nothing queued fail
+with `errc::try_again`; `sys::poll` waits for either. Interrupted calls are restarted.
+
+```c++
+#include "ca/file.hpp"
+#include "ca/net.hpp"
+
+auto main(void) -> int {
+	auto server = ca::sys::udp_socket(0);
+	auto client = ca::sys::udp_socket(0);
+	if (!server || !client || !ca::sys::bind(*server, ca::sys::ipv4_endpoint::loopback(0U)))
+		return 1;
+	auto address = ca::sys::local_endpoint(*server);
+	if (!address || address->port() == 0U)
+		return 2;
+	const ca::byte hello[] = {'h', 'i'};
+	auto sent = ca::sys::send_to(*client, hello, *address);
+	if (!sent || *sent != 2U)
+		return 3;
+	ca::byte buffer[16];
+	auto got = ca::sys::receive_from(*server, buffer);
+	if (!got || got->size != 2U || buffer[1] != 'i' || got->from.address() != 0x7F000001U)
+		return 4;
+	return ca::sys::close(*client) && ca::sys::close(*server) ? 0 : 5;
+}
+```

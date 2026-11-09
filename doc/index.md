@@ -75,11 +75,11 @@ c++ -std=c++2c -nostdinc++ -fno-exceptions -fno-rtti -I src/lib prog.cpp -nostdl
 |---|---|---|
 | [1-primitives](1-primitives.md) | 239 | 200/200 |
 | [2-vocabulary](2-vocabulary.md) | 67 | 20/20 |
-| [3-system](3-system.md) | 238 | 5/5 |
+| [3-system](3-system.md) | 246 | 5/5 |
 | [4-lifecycle](4-lifecycle.md) | 45 | 68/68 |
 | [5-collections](5-collections.md) | 95 | 47/47 |
 | [6-resources](6-resources.md) | 22 | 4/4 |
-| [ca](ca.md) | 134 | 0/0 |
+| [ca](ca.md) | 135 | 0/0 |
 
 ## [1-primitives](1-primitives.md)
 
@@ -534,6 +534,14 @@ Layer 3: the boundary with the operating system.
 - [`memory/reallocarray.hpp`](3-system.md#memoryreallocarrayhpp) - Resizes block (nullptr: allocates one) to count * size bytes, aligned to malloc_alignment; conten...
 - [`memory/remapping.hpp`](3-system.md#memoryremappinghpp) - Whether mremap must keep the mapping at its address (in_place) or may move it.
 - [`memory/sharing.hpp`](3-system.md#memorysharinghpp) - Whether writes to a file mapping reach the file and other mappings (shared), or stay in private c...
+- [`net/bind.hpp`](3-system.md#netbindhpp) - Gives socket fd the local endpoint (port 0: one the system picks, see local_endpoint).
+- [`net/datagram.hpp`](3-system.md#netdatagramhpp) - What receive_from got: the bytes written into the buffer and who sent them.
+- [`net/ipv4_endpoint.hpp`](3-system.md#netipv4endpointhpp) - An IPv4 address and a port, both in host order: what sockaddr_in holds, without \<netinet/in.h>.
+- [`net/local_endpoint.hpp`](3-system.md#netlocalendpointhpp) - The local endpoint socket fd is bound to (getsockname).
+- [`net/receive_from.hpp`](3-system.md#netreceivefromhpp) - Receives one datagram into buffer: its size (cut to the buffer) and its sender.
+- [`net/send_to.hpp`](3-system.md#netsendtohpp) - Sends bytes as one datagram to endpoint; returns the bytes sent (all of them for UDP).
+- [`net/udp_socket.hpp`](3-system.md#netudpsockethpp) - A new IPv4 UDP socket.
+- [`net/impl/sockaddr_ipv4.hpp`](3-system.md#netimplsockaddripv4hpp)
 - [`process/execve.hpp`](3-system.md#processexecvehpp) - Replaces the process image with program path, arguments argv and environment envp (both null-term...
 - [`process/execvp.hpp`](3-system.md#processexecvphpp) - execve with the current environment, looking file up in $PATH when it has no '/'.
 - [`process/exit.hpp`](3-system.md#processexithpp) - Ends the process with status after atexit handlers and stdio flushing.
@@ -895,6 +903,7 @@ The include facade: what programs include.
 - [`memory_reader.hpp`](ca.md#memoryreaderhpp) - `#include "ca/memory_reader.hpp"`: 5-collections/io/memory_reader.hpp.
 - [`memory_writer.hpp`](ca.md#memorywriterhpp) - `#include "ca/memory_writer.hpp"`: 5-collections/io/memory_writer.hpp.
 - [`mpmc_queue.hpp`](ca.md#mpmcqueuehpp) - `#include "ca/mpmc_queue.hpp"`: 5-collections/concurrent/mpmc_queue.hpp.
+- [`net.hpp`](ca.md#nethpp) - `#include "ca/net.hpp"`: 3-system/net/.
 - [`nullopt.hpp`](ca.md#nullopthpp) - `#include "ca/nullopt.hpp"`: 2-vocabulary/nullopt.hpp.
 - [`numeric.hpp`](ca.md#numerichpp) - `#include "ca/numeric.hpp"`: 1-primitives/numeric/.
 - [`ok.hpp`](ca.md#okhpp) - `#include "ca/ok.hpp"`: 2-vocabulary/ok.hpp.
