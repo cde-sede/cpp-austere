@@ -1,4 +1,5 @@
-Buffered I/O over file descriptors, and the process's standard streams.
+Buffered I/O over file descriptors, the process's standard streams, and an event loop
+(`io::reactor`) driving many descriptors from one thread.
 
 | Type | Buffer | Descriptor |
 |---|---|---|
@@ -135,3 +136,150 @@ otherwise, opened on first use, flushed when the thread exits and, for the threa
 thread, it needs no lock, and each message reaches fd 1 whole. `io::err()` is unbuffered: each
 message is one write as it happens. `io::in()` is the process's standard input, one per process,
 so read it from one thread at a time.
+
+### Reactor
+
+`io::reactor` is an event loop over epoll, owned by the thread that runs it. It calls handlers
+the caller owns, each a class deriving from a base templated on itself:
+
+| Base | Registered by | Calls |
+|---|---|---|
+| `io::watcher<Self>` | `watch(w, fd, interest)`, `change`, `unwatch` | `on_readable(reactor&)`, `on_writable(reactor&)`, optionally `on_hangup(reactor&)` |
+| `io::timer<Self>` | `schedule_at(t, deadline_ns)`, `schedule_after(t, delay_ns)`, `cancel` | `on_timer(reactor&)`, once per scheduling |
+| `io::task<Self>` | `post(t)`, from any thread | `on_posted(reactor&)`, on the reactor's thread |
+
+The reactor allocates nothing: the handlers hold their links (24 to 56 bytes) and the reactor
+their addresses, so a handler stays put while watched, scheduled or posted. A handler may do
+anything to the reactor, itself included: unwatch itself and be destroyed, reschedule itself
+(a periodic timer), watch new descriptors (an accepted connection). Unwatching drops the
+handler's pending events of the current round too, so a closed connection is never called again.
+
+`interest` bits are `readable`, `writable` and `none`, level-triggered: a handler is called while
+its descriptor stays ready, so one read per call is enough. A buffered reader may hold more than
+the descriptor shows, though, so a handler parsing with `read_until` loops until `try_again`.
+`interest::edge` switches a watch to edge triggering (called on changes only: drain until
+`try_again`). The usual write path stays readable-only: write, `write_pending()`; on `try_again`,
+`clear_error()` and `change` to `readable | writable`; `on_writable` writes the rest and drops
+writable again. Errors and hangups go to `on_hangup` when Self has one, otherwise to its other
+handlers as readiness (the next read returns 0 or the error).
+
+`run()` loops until `stop()` or until nothing is left: no watch, no timer, no posted task. A
+round is one epoll_wait (its timeout the nearest timer deadline, in nanoseconds), the ready
+handlers, the due timers, then the posted tasks. One reactor per thread scales out: each thread
+runs its own, with listeners bound through `socket_option::reuse_port`, or one acceptor handing
+descriptors to the others in posted tasks. `post`, `wake` and `stop` are the only members other
+threads may call; `post` is one CAS and, at most once per round, an eventfd write.
+
+```c++
+#include "ca/buffering.hpp"
+#include "ca/error.hpp"
+#include "ca/file.hpp"
+#include "ca/format_to.hpp"
+#include "ca/fs.hpp"
+#include "ca/interest.hpp"
+#include "ca/net.hpp"
+#include "ca/optional.hpp"
+#include "ca/reactor.hpp"
+#include "ca/stream.hpp"
+#include "ca/sv.hpp"
+#include "ca/timer.hpp"
+#include "ca/watcher.hpp"
+
+struct watchdog final : ca::io::timer<watchdog> {
+
+	bool fired = false;
+
+	auto on_timer(ca::io::reactor& r) noexcept -> void {
+		fired = true;
+		r.stop();
+	}
+
+};
+
+struct connection final : ca::io::watcher<connection> {
+
+	int fd;
+	char input[256];
+	char output[256];
+	ca::io::stream stream;
+	watchdog* dog;
+
+	connection(const int socket, watchdog* const d) noexcept
+	: fd{socket}, input{}, output{}, stream{socket, ca::io::buffering::full, input, output}, dog{d} {
+	}
+
+	auto finish(ca::io::reactor& r) noexcept -> void {
+		(void)stream.flush();
+		(void)r.unwatch(*this);
+		(void)ca::sys::close(fd);
+		r.cancel(*dog);
+	}
+
+	auto on_readable(ca::io::reactor& r) noexcept -> void {
+		for (;;) {
+			auto line = stream.read_until('\n');
+			if (!line) {
+				if (line.error() != ca::errc::try_again)
+					finish(r);
+				return;
+			}
+			if (line->size() == 0U || !ca::format_to(stream, "{}", *line) || !stream.write_pending()) {
+				finish(r);
+				return;
+			}
+		}
+	}
+
+};
+
+struct listener final : ca::io::watcher<listener> {
+
+	int fd = -1;
+	watchdog* dog = nullptr;
+	ca::optional<connection>* slot = nullptr;
+
+	auto on_readable(ca::io::reactor& r) noexcept -> void {
+		auto peer = ca::sys::accept(fd, ca::fs::cloexec_t::OPEN_VALUE | ca::fs::nonblock_t::OPEN_VALUE);
+		if (!peer)
+			return;
+		connection& c = *slot->emplace(*peer, dog);
+		if (!r.watch(c, *peer, ca::io::interest::readable))
+			r.stop();
+		(void)r.unwatch(*this);
+	}
+
+};
+
+auto main(void) -> int {
+	auto made = ca::io::reactor::make();
+	if (!made)
+		return 1;
+	ca::io::reactor& r = *made;
+	const int cloexec = ca::fs::cloexec_t::OPEN_VALUE;
+	auto server = ca::sys::tcp_listen(ca::sys::ipv4_endpoint::loopback(0U), -1, cloexec | ca::fs::nonblock_t::OPEN_VALUE);
+	auto address = server ? ca::sys::local_endpoint(*server) : server.propagate();
+	if (!server || !address)
+		return 2;
+	auto client = ca::sys::tcp_connect(*address, cloexec);
+	if (!client || !ca::sys::write_all(*client, ca::sv::str{"hello\n"}) || !ca::sys::shutdown(*client, ca::sys::shutdown_side::write))
+		return 3;
+
+	watchdog dog{};
+	ca::optional<connection> slot{};
+	listener l{};
+	l.fd = *server;
+	l.dog = &dog;
+	l.slot = &slot;
+	if (!r.watch(l, *server, ca::io::interest::readable))
+		return 4;
+	r.schedule_after(dog, 1000000000);
+	if (!r.run() || dog.fired)
+		return 5;
+
+	char reply[16];
+	auto n = ca::sys::read(*client, reply);
+	if (!n || ca::sv::str{reply, *n} != ca::sv::str{"hello\n"})
+		return 6;
+	return ca::sys::close(*client) && ca::sys::close(*server) && r.cleanup() ? 0 : 7;
+}
+```

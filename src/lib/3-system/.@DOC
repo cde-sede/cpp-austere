@@ -10,6 +10,7 @@ library passes through here, and only here.
 - `ca::trace`: the per-thread error trace, so an error can say where it came from.
 - `ca::fs` options: the open flags as compile-time options (see `option_set`, layer 2).
 - text: float formatting, the one piece of formatting that needs the C library.
+- sanitizer: the UBSan handlers of a build without UBSan's runtime, each check a ca trap.
 
 ### Nothing of libc leaks
 

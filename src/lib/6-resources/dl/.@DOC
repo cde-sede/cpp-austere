@@ -21,6 +21,8 @@ A symbol a library leaves undefined resolves, in order, to:
 
 - the program's explicit offers (the `host` argument, `dl::host_symbol`: a name and an address),
   which always win;
+- the loader's built-ins (`__tls_get_addr`), before the program's exports: an ASan program
+  exports the sanitizer's own `__tls_get_addr`, which knows nothing of these modules;
 - the library's own definition, when it is linked `-Bsymbolic` (DT_SYMBOLIC);
 - what the running program exports, as ld.so puts the executable first in the global scope: the
   defined, non-local symbols of its dynamic symbol table (`elf::image::program()`, read once on
@@ -28,7 +30,6 @@ A symbol a library leaves undefined resolves, in order, to:
   `-Wl,--export-dynamic` (`-rdynamic`); without it, only what the shared libraries it was
   linked against reference (under libc: `environ`, copy-relocated data). A static non-PIE
   program exports nothing: GNU ld gives it no dynamic section, even with `--export-dynamic`;
-- the loader's built-ins (`__tls_get_addr`);
 - the first definition in the scope of the library loaded: itself, then what it needs, breadth
   first.
 

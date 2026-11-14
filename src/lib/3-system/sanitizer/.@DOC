@@ -1,0 +1,13 @@
+The handlers `-fsanitize=undefined` calls (`__ubsan_handle_add_overflow` and the rest, each
+with its `_abort` form), so that a UBSan build needs no runtime: libc programs and freestanding
+ones alike link them from libca.a. A failed check is a ca trap: a context taking it fails with
+the check as its reason (`signed integer overflow`, `shift out of bounds`, `misaligned pointer
+use`, ...) at the source line that failed, and the program goes on; with none, the program
+writes one line and stops by an illegal instruction:
+
+    ca: undefined behavior: signed integer overflow at tests/ubsan_trap.cpp:13:15
+
+The handlers are weak, so a sanitizer runtime linked in (ASan's carries UBSan's) keeps its own.
+`make SAN=undefined` builds the library and the tests so, with `-fno-sanitize-recover`; no
+check returns. tests/ubsan_context.cpp shows a context taking the checks, tests/ubsan_trap.cpp
+the line printed without one.

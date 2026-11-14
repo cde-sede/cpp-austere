@@ -136,7 +136,7 @@ auto main(void) -> int {
 			}
 	for (const ca::usz count : large_sizes)
 		for (const ca::usz shift : offsets) {
-			if (!copy_case(*copy, count, shift, 8U - shift))
+			if (!copy_case(*copy, count, shift, (8U - shift % 8U) % 8U))
 				return 6;
 			if (!move_case(*move, count, shift + 100U, shift))
 				return 7;

@@ -529,10 +529,12 @@ namespace {
 		return o._image.value(ca::elf::dynamic_tags::symbolic) || (flags && (*flags & ca::elf::dynamic_flags::symbolic) != 0U);
 	}
 
-	/* What symbol index of o refers to: o's own for a local symbol; else the host's, then o's
-	   own under DT_SYMBOLIC, then the program's exported ones (a thread-local one only when
-	   nothing else defines it, and then refused), then the loader's built-ins, then the first
-	   definition in root's scope; address 0 for an undefined weak symbol. */
+	/* What symbol index of o refers to: o's own for a local symbol; else the host's, then the
+	   loader's built-ins (before the program's: an ASan program exports its own
+	   __tls_get_addr, blind to these modules), then o's own under DT_SYMBOLIC, then the
+	   program's exported ones (a thread-local one only when nothing else defines it, and then
+	   refused), then the first definition in root's scope; address 0 for an undefined weak
+	   symbol. */
 	[[nodiscard]] auto resolve(const object& o, const ca::u32 index, const object& root, const session& s) noexcept -> ca::result<resolved, ca::report<>> {
 
 		const auto symbols = o._image.symbols();
@@ -550,6 +552,9 @@ namespace {
 				if (offered._name == name)
 					return resolved{nullptr, nullptr, reinterpret_cast<ca::u64>(offered._address)};
 			}
+			const auto provided = built_in(name);
+			if (provided)
+				return resolved{nullptr, nullptr, *provided};
 			const ca::elf::hashed_name hashed = ca::elf::hashed_name::of(name);
 			if (is_symbolic(o)) {
 				const auto own = o._image.find(hashed);
@@ -563,9 +568,6 @@ namespace {
 						return resolved{nullptr, nullptr, definition(*s._program, *exported)};
 					program_tls = true;
 				}
-				const auto provided = built_in(name);
-				if (provided)
-					return resolved{nullptr, nullptr, *provided};
 				found = find_in(root._scope, hashed, owner);
 			}
 		}

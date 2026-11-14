@@ -12,6 +12,9 @@ porting means editing this folder.
 | `ca_target_feature(floats)` | 1 when the build may use floating-point registers; 0 only in an integer-only build (x86-64 without SSE2, aarch64 `-mgeneral-regs-only`, riscv64 without F), 1 on another CPU |
 | `ca_has_builtin(name)` | `__has_builtin(name)`, or 0 where the compiler lacks it |
 | `ca_debug` | 1 unless `NDEBUG` is defined; may be predefined to 0 or 1 |
+| `ca_sanitizer(address)` | 1 in a build with `-fsanitize=address`, else 0 |
+| `ca_memory_poisoning` | 1 under ASan unless predefined to 0: ca's allocators mark what they do not hand out |
+| `ca_no_sanitize(name)` | an attribute, inside `[[...]]`: the function is not instrumented by that sanitizer |
 
 The macros expand to expressions, so they work in `#if` and in ordinary code alike. A
 misspelled name is a compile error rather than a silent 0, since each expands to a function
@@ -44,3 +47,11 @@ auto main(void) -> int {
 prove it) and the block checks of `ca::heap` on deallocation. Building with `-DNDEBUG` turns
 them off; `-Dca_debug=1` keeps them in a release build. Accessing an absent value traps in
 every build, whatever `ca_debug` says.
+
+ASan cannot see inside an allocator that gets its pages from the kernel itself. Under
+`ca_memory_poisoning`, `ca::heap` and `ca::arena` tell it through the hooks of
+`memory/poison.hpp` (`__asan_poison_memory_region` and its pair, nothing in any other build):
+free blocks, a chunk's room past its newest block, what a scope's pop released. A use of it is
+reported as a use after poison, and a block of `ca::heap` freed twice traps.
+`make SAN=address` builds and tests that way; `make SAN=undefined` builds with UBSan and no
+runtime of its own, each failed check a ca trap (3-system/sanitizer/).

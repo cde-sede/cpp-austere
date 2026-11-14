@@ -19,8 +19,8 @@ static char alternate[65536];
 static volatile bool on_alternate = false;
 
 static auto on_signal(int) -> void {
-	const char here = 0;
-	on_alternate = &here >= alternate && &here < alternate + sizeof(alternate);
+	const char* const here = static_cast<const char*>(__builtin_frame_address(0));
+	on_alternate = here >= alternate && here < alternate + sizeof(alternate);
 }
 
 auto main(void) -> int {

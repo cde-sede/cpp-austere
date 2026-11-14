@@ -5,6 +5,7 @@
 #include "1-primitives/integers/u32.hpp"
 #include "1-primitives/integers/u64.hpp"
 #include "1-primitives/integers/usz.hpp"
+#include "1-primitives/memory/poison.hpp"
 #include "4-lifecycle/memory/impl/heap_traps.hpp"
 
 
@@ -27,7 +28,8 @@ namespace ca {
 		   of blocks, or the full mark once the owner found nothing left, frees then going to the
 		   owner's heap instead. A thread freeing a block touches the span no more after it. With
 		   G::CHECK_DOUBLE_FREE, the marks of the blocks in use (a bit per 16 bytes) sit right
-		   below the header. */
+		   below the header. Under ca_memory_poisoning, every byte of the blocks area not in use
+		   is poisoned: free blocks, links included, uncarved room, a spare span's blocks. */
 		template <typename G>
 		struct alignas(64) heap_span final {
 				using self = ca::impl::heap_span<G>;
@@ -83,6 +85,24 @@ namespace ca {
 
 			const ca::usz bit = ca::impl::heap_mark_of<G>(block);
 			ca::impl::heap_marks_of<G>(span)[bit / 64U] |= ca::u64{1U} << (bit % 64U);
+		}
+
+		/* @DOC The link of a free block, its first word, read; poisoned again after it
+		   (ca_memory_poisoning), as the rest of the block. */
+		[[nodiscard, gnu::always_inline]] inline auto heap_link_of(void* const block) noexcept -> void* {
+
+			ca::impl::unpoison_bytes(block, sizeof(void*));
+			void* const next = *static_cast<void**>(block);
+			ca::impl::poison_bytes(block, sizeof(void*));
+			return next;
+		}
+
+		/* @DOC Sets the link of a free block, poisoned after it. */
+		[[gnu::always_inline]] inline auto heap_set_link(void* const block, void* const next) noexcept -> void {
+
+			ca::impl::unpoison_bytes(block, sizeof(void*));
+			*static_cast<void**>(block) = next;
+			ca::impl::poison_bytes(block, sizeof(void*));
 		}
 
 		/* @DOC Clears block's mark; traps when block is not on a 16-byte boundary, or its mark was

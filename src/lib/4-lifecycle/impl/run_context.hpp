@@ -2,6 +2,7 @@
 #define ca_lifecycle_impl_run_context_hpp
 
 #include "1-primitives/config/compiler.hpp"
+#include "1-primitives/config/sanitizer.hpp"
 #include "1-primitives/debug/recovery.hpp"
 #include "1-primitives/debug/verdict.hpp"
 #include "1-primitives/traits/is_constructible.hpp"
@@ -54,12 +55,13 @@ namespace ca {
 		/* @DOC Sets point, makes it the thread's innermost, runs body; true when a trap came back
 		   to point. Opaque to gcc's interprocedural analysis: when body never returns normally, gcc
 		   would otherwise take the landing path for the only exit and assume body's stores never
-		   reach the caller. */
+		   reach the caller. Not instrumented by ASan: its frame cleanup, run again when the trap
+		   lands back here, writes the shadow of frames the jump already left. */
 		template <typename F>
 #if ca_compiler(gcc)
-		[[gnu::noipa]]
+		[[gnu::noipa, ca_no_sanitize(address)]]
 #else
-		[[gnu::noinline]]
+		[[gnu::noinline, ca_no_sanitize(address)]]
 #endif
 		auto enter_recovery(ca::impl::recovery& point, F& body) noexcept -> bool {
 

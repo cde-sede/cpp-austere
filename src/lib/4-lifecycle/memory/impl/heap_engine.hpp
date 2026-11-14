@@ -15,6 +15,7 @@
 #include "1-primitives/memory/construct_at.hpp"
 #include "1-primitives/memory/copy_bytes.hpp"
 #include "1-primitives/memory/fill_bytes.hpp"
+#include "1-primitives/memory/poison.hpp"
 #include "1-primitives/numeric/max.hpp"
 #include "1-primitives/numeric/min.hpp"
 #include "1-primitives/traits/is_same.hpp"
@@ -89,7 +90,6 @@ namespace ca {
 					[[nodiscard]] static auto is_small(ca::usz size, ca::usz alignment) noexcept -> bool;
 					[[nodiscard]] static auto class_for(ca::usz size, ca::usz alignment) noexcept -> ca::u32;
 					[[nodiscard]] static auto full_mark(void) noexcept -> void*;
-					[[nodiscard]] static auto next_of(void* block) noexcept -> void*&;
 
 					[[nodiscard]] static auto usable_size(ca::usz size, ca::usz alignment) noexcept -> ca::usz;
 					static auto count_large(ca::usz blocks, ca::usz bytes) noexcept -> void;
@@ -142,12 +142,6 @@ namespace ca {
 	template <typename Heap>
 	[[nodiscard]] auto ca::impl::heap_engine<Heap>::full_mark(void) noexcept -> void* {
 		return reinterpret_cast<void*>(ca::usz{1U});
-	}
-
-	/* @DOC The link of a free block, in its first word. */
-	template <typename Heap>
-	[[nodiscard]] auto ca::impl::heap_engine<Heap>::next_of(void* const block) noexcept -> void*& {
-		return *static_cast<void**>(block);
 	}
 
 
@@ -236,7 +230,8 @@ namespace ca {
 		target->_previous = nullptr;
 	}
 
-	/* @DOC An emptied span: kept as a spare while there is room, else back to pages. */
+	/* @DOC An emptied span: kept as a spare while there is room, its blocks poisoned, else back to
+	   pages, unpoisoned for whoever maps the range next. */
 	template <typename Heap>
 	auto ca::impl::heap_engine<Heap>::release(state* const heap, span* const target) noexcept -> void {
 
@@ -248,10 +243,12 @@ namespace ca {
 			heap->_counters.add_spare(1U);
 			return;
 		}
+		ca::impl::unpoison_bytes(self::base_of(target), ca::impl::heap_blocks_end<geometry>);
 		pages{}.deallocate(ca::allocation{self::base_of(target), geometry::SPAN_SIZE}, geometry::SPAN_SIZE);
 	}
 
-	/* @DOC A span for class index of heap: a spare, else new from pages, its marks cleared. */
+	/* @DOC A span for class index of heap: a spare, else new from pages, its marks cleared, its
+	   blocks poisoned until carved. */
 	template <typename Heap>
 	[[nodiscard]] auto ca::impl::heap_engine<Heap>::fresh_span(state* const heap, const ca::u32 index) noexcept -> ca::result<span*> {
 
@@ -279,6 +276,7 @@ namespace ca {
 		target->_unused = base;
 		 target->_limit = base + (ca::impl::heap_blocks_end<geometry> / size) * size;
 		  target->_heap = heap;
+		ca::impl::poison_bytes(base, ca::impl::heap_blocks_end<geometry>);
 		heap->_counters.add_span(index);
 		return target;
 	}
@@ -291,13 +289,13 @@ namespace ca {
 		void* tail = list;
 		if constexpr (geometry::CHECK_DOUBLE_FREE)
 			ca::impl::heap_unmark<geometry>(target, tail);
-		while (self::next_of(tail) != nullptr) {
-			tail = self::next_of(tail);
+		while (ca::impl::heap_link_of(tail) != nullptr) {
+			tail = ca::impl::heap_link_of(tail);
 			if constexpr (geometry::CHECK_DOUBLE_FREE)
 				ca::impl::heap_unmark<geometry>(target, tail);
 			++count;
 		}
-		self::next_of(tail) = target->_free;
+		ca::impl::heap_set_link(tail, target->_free);
 		    target->_free = list;
 		    target->_used -= count;
 		target->_heap->_counters.remove_blocks(target->_class, count);
@@ -315,9 +313,11 @@ namespace ca {
 		bytes -= bytes % size;
 		bytes = ca::min(bytes, static_cast<ca::usz>(target->_limit - start));
 		char* const last = start + bytes - size;
+		ca::impl::unpoison_bytes(start, bytes);
 		for (char* block = start; block != last; block += size)
-			self::next_of(block) = block + size;
-		self::next_of(last) = nullptr;
+			*reinterpret_cast<void**>(block) = block + size;
+		*reinterpret_cast<void**>(last) = nullptr;
+		ca::impl::poison_bytes(start, bytes);
 		  target->_free = start;
 		target->_unused = start + bytes;
 		return true;
@@ -330,7 +330,8 @@ namespace ca {
 		if constexpr (geometry::CHECK_DOUBLE_FREE)
 			ca::impl::heap_unmark<geometry>(target, block);
 		void* const head = target->_free;
-		self::next_of(block) = head;
+		ca::impl::heap_set_link(block, head);
+		ca::impl::poison_bytes(block, target->_size);
 		target->_free = block;
 		--target->_used;
 		target->_heap->_counters.remove_blocks(target->_class, 1U);
@@ -342,17 +343,18 @@ namespace ca {
 	template <typename Heap>
 	auto ca::impl::heap_engine<Heap>::remote_free(span* const target, void* const block) noexcept -> void {
 
+		ca::impl::poison_bytes(block, target->_size);
 		void* old = target->_remote.template load<ca::memory_order::relaxed>();
 		for (;;) {
 			if (old == self::full_mark()) {
 				state* const heap = target->_heap;
 				void* head = heap->_pending.template load<ca::memory_order::relaxed>();
 				do
-					self::next_of(block) = head;
+					ca::impl::heap_set_link(block, head);
 				while (!heap->_pending.template compare_exchange_weak<ca::memory_order::release, ca::memory_order::relaxed>(head, block));
 				return;
 			}
-			self::next_of(block) = old;
+			ca::impl::heap_set_link(block, old);
 			if (target->_remote.template compare_exchange_weak<ca::memory_order::release, ca::memory_order::relaxed>(old, block))
 				return;
 		}
@@ -364,7 +366,7 @@ namespace ca {
 
 		void* block = heap->_pending.template exchange<ca::memory_order::acquire>(nullptr);
 		while (block != nullptr) {
-			void* const next = self::next_of(block);
+			void* const next = ca::impl::heap_link_of(block);
 			self::local_free(ca::impl::heap_span_of<geometry>(block), block);
 			block = next;
 		}
@@ -390,7 +392,8 @@ namespace ca {
 					}
 				}
 				void* const block = target->_free;
-				target->_free = self::next_of(block);
+				ca::impl::unpoison_bytes(block, target->_size);
+				target->_free = *static_cast<void**>(block);
 				++target->_used;
 				if constexpr (geometry::CHECK_DOUBLE_FREE)
 					ca::impl::heap_mark<geometry>(target, block);
@@ -487,6 +490,8 @@ namespace ca {
 			return;
 		}
 		span_type* const span = ca::impl::heap_span_of<G>(block.data());
+		if constexpr (ca_memory_poisoning)
+			self::_check_live(block);
 		if constexpr (ca_debug != 0)
 			self::_check(span, block, alignment);
 		const auto pin = binding_type::pin();
@@ -532,6 +537,14 @@ namespace ca {
 		if (span->_class != engine::class_for(block.size(), alignment)) [[unlikely]]
 			ca::impl::heap_block_freed_with_another_size_class();
 		ca::fill_bytes(data + sizeof(void*), engine::POISON_BYTE, span->_size - sizeof(void*));
+	}
+
+	/* @DOC Under ca_memory_poisoning: block, small, is in use, its first byte not poisoned; else
+	   it was freed already, or never handed out. */
+	template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+	auto ca::basic_heap<Pages, G, Binding>::_check_live(const ca::allocation block) noexcept -> void {
+		if (ca::impl::is_poisoned(block.data())) [[unlikely]]
+			ca::impl::heap_block_freed_twice_or_never_allocated();
 	}
 
 	/* @DOC Large blocks from pages' allocate_zeroed, small ones filled. */

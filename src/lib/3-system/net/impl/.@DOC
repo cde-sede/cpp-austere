@@ -1,0 +1,11 @@
+Socket plumbing shared by the `ca::sys` net wrappers, without system headers in any header.
+
+- `sockaddr_ipv4` and `sockaddr_unix`: struct sockaddr_in and sockaddr_un as the platform lays
+  them out, with `to_sockaddr` / `from_sockaddr` / `checked_endpoint` for `ipv4_endpoint` and
+  `to_sockaddr(path, out)` for Unix paths (abstract names included); layouts checked against
+  `<netinet/in.h>` and `<sys/un.h>` in the sibling `.cpp` files.
+- `socket_constants`: `IPPROTO_TCP`, `TCP_NODELAY`, `SHUT_*`, `SOL_SOCKET` and the `SO_*`
+  options ca sets, per platform, checked against the system headers.
+- `open_socket(family, type, protocol, flags)`: socket() with the `fs::cloexec` / `fs::nonblock`
+  flag check every socket constructor shares (atomic on Linux, fcntl elsewhere), and
+  `discard_socket(fd)` for closing a socket after a failure that is returned instead.

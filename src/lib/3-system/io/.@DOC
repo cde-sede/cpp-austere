@@ -1,11 +1,16 @@
-Descriptor plumbing beyond plain reads and writes: pipes, waiting on several descriptors,
-scatter and gather I/O, terminals.
+Descriptor plumbing beyond plain reads and writes: pipes, waiting on several descriptors (poll,
+epoll), wakeup counters, scatter and gather I/O, terminals.
 
 | Function | Does |
 |---|---|
 | `sys::pipe(flags)` | a new pipe, as `pipe_ends` (`read_end()`, `write_end()`); flags from `ca::fs` |
 | `sys::dup2(fd, target)` | makes target a copy of fd (the copy is not close-on-exec) |
 | `sys::poll(entries, timeout_ms)` | waits for events on `poll_entry`s; -1 waits forever, 0 not at all |
+| `sys::epoll_create(flags)` | a new epoll descriptor (Linux) |
+| `sys::epoll_add(epfd, fd, events, data)`, `epoll_modify`, `epoll_remove(epfd, fd)` | what epfd watches: `epoll_events` bits, a 64-bit word handed back with each report |
+| `sys::epoll_wait(epfd, reported, timeout_ns)` | fills `epoll_event`s (`events()`, `data()`, `has(bits)`); nanosecond timeout, -1 forever |
+| `sys::eventfd(initial, flags)` | a counter descriptor, readable while nonzero: one thread wakes another's wait |
+| `sys::eventfd_write(fd, value)`, `sys::eventfd_read(fd)` | adds to the counter, takes it whole |
 | `sys::readv(fd, buffers)`, `sys::writev(fd, buffers)` | one call over several `io_buffer`s |
 | `sys::isatty(fd)` | whether fd is a terminal |
 | `sys::get_terminal_size(fd)` | rows and columns of the terminal fd is attached to |
@@ -82,3 +87,50 @@ auto main(void) -> int {
 An `io_buffer` has the layout of `struct iovec`, so an array of them goes to the kernel as is,
 and it converts from anything a byte span is made from: text, char arrays, strings. The caller
 closes both ends of a pipe.
+
+### epoll
+
+`poll` takes the whole set on every call; epoll keeps it in the kernel, so a wait costs what is
+ready, not what is watched. Each registration carries a 64-bit word (an index, a pointer)
+handed back with its reports. `epoll_events` holds the bits: `readable`, `writable`, `urgent`,
+`peer_closed`, the always-reported `error` and `hangup`, and the modes `edge` (report changes
+only: drain until `try_again`), `oneshot` (report once, then rearm with `epoll_modify`) and
+`exclusive`. An `epoll_event` has the kernel's layout, packed on x86-64, so `epoll_wait` fills an
+array in place; its timeout is in nanoseconds (epoll_pwait2, milliseconds rounded up on kernels
+without it). An `eventfd` counter makes waits wakeable: another thread `eventfd_write`s, the
+waiter's epoll reports it readable, `eventfd_read` resets it. `ca::io::reactor` (layer 6) is an
+event loop over both. Linux only: `errc::not_supported` elsewhere.
+
+```c++
+#include "ca/error.hpp"
+#include "ca/file.hpp"
+#include "ca/fs.hpp"
+#include "ca/io.hpp"
+#include "ca/sv.hpp"
+
+auto main(void) -> int {
+	const int flags = ca::fs::cloexec_t::OPEN_VALUE | ca::fs::nonblock_t::OPEN_VALUE;
+	auto ep = ca::sys::epoll_create(ca::fs::cloexec_t::OPEN_VALUE);
+	auto ends = ca::sys::pipe(flags);
+	auto wake = ca::sys::eventfd(0U, flags);
+	if (!ep || !ends || !wake)
+		return 1;
+	if (!ca::sys::epoll_add(*ep, ends->read_end(), ca::sys::epoll_events::readable, 1U)
+	 || !ca::sys::epoll_add(*ep, *wake, ca::sys::epoll_events::readable, 2U))
+		return 2;
+	if (!ca::sys::write(ends->write_end(), ca::sv::str{"x"}) || !ca::sys::eventfd_write(*wake, 1U))
+		return 3;
+	ca::sys::epoll_event reported[4];
+	auto ready = ca::sys::epoll_wait(*ep, reported, 1000000000);
+	if (!ready || *ready != 2U || reported[0].data() + reported[1].data() != 3U)
+		return 4;
+	auto count = ca::sys::eventfd_read(*wake);
+	if (!count || *count != 1U)
+		return 5;
+	auto idle = ca::sys::epoll_wait(*ep, reported, 1000000);
+	if (!idle || *idle != 1U || reported[0].data() != 1U)
+		return 6;
+	return ca::sys::close(*wake) && ca::sys::close(ends->read_end()) && ca::sys::close(ends->write_end())
+		&& ca::sys::close(*ep) ? 0 : 7;
+}
+```

@@ -1,4 +1,6 @@
 // expect: exit 0
+// sanitize: !address
+// ASan puts its own memcpy and memmove in front of ca's.
 #include "1-primitives/memory/copy_bytes.hpp"
 #include "1-primitives/memory/impl/move_bytes.hpp"
 

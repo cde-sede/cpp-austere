@@ -3,11 +3,22 @@
 #ifndef ca_include_net_hpp
 #define ca_include_net_hpp
 
+#include "3-system/net/accept.hpp"
 #include "3-system/net/bind.hpp"
+#include "3-system/net/connect.hpp"
+#include "3-system/net/listen.hpp"
 #include "3-system/net/local_endpoint.hpp"
+#include "3-system/net/peer_endpoint.hpp"
 #include "3-system/net/receive_from.hpp"
 #include "3-system/net/send_to.hpp"
+#include "3-system/net/set_socket_option.hpp"
+#include "3-system/net/shutdown.hpp"
+#include "3-system/net/socket_error.hpp"
+#include "3-system/net/tcp_connect.hpp"
+#include "3-system/net/tcp_listen.hpp"
+#include "3-system/net/tcp_socket.hpp"
 #include "3-system/net/udp_socket.hpp"
 #include "3-system/net/unix_connect.hpp"
+#include "3-system/net/unix_listen.hpp"
 
 #endif // ca_include_net_hpp

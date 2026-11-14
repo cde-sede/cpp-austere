@@ -412,6 +412,9 @@ Compile-time facts about the build, as function-like macros: the compiler, the t
 | `ca_target_feature(floats)` | 1 when the build may use floating-point registers; 0 only in an integer-only build (x86-64 without SSE2, aarch64 `-mgeneral-regs-only`, riscv64 without F), 1 on another CPU |
 | `ca_has_builtin(name)` | `__has_builtin(name)`, or 0 where the compiler lacks it |
 | `ca_debug` | 1 unless `NDEBUG` is defined; may be predefined to 0 or 1 |
+| `ca_sanitizer(address)` | 1 in a build with `-fsanitize=address`, else 0 |
+| `ca_memory_poisoning` | 1 under ASan unless predefined to 0: ca's allocators mark what they do not hand out |
+| `ca_no_sanitize(name)` | an attribute, inside `[[...]]`: the function is not instrumented by that sanitizer |
 
 The macros expand to expressions, so they work in `#if` and in ordinary code alike. A misspelled name is a compile error rather than a silent 0, since each expands to a function macro named after its argument.
 
@@ -438,6 +441,8 @@ auto main(void) -> int {
 ```
 
 `ca_debug` turns on the checked-access rule of the uncertain containers (`optional`, `result`: reading the value before testing it fails, at compile time when the optimizer can prove it) and the block checks of `ca::heap` on deallocation. Building with `-DNDEBUG` turns them off; `-Dca_debug=1` keeps them in a release build. Accessing an absent value traps in every build, whatever `ca_debug` says.
+
+ASan cannot see inside an allocator that gets its pages from the kernel itself. Under `ca_memory_poisoning`, `ca::heap` and `ca::arena` tell it through the hooks of `memory/poison.hpp` (`__asan_poison_memory_region` and its pair, nothing in any other build): free blocks, a chunk's room past its newest block, what a scope's pop released. A use of it is reported as a use after poison, and a block of `ca::heap` freed twice traps. `make SAN=address` builds and tests that way; `make SAN=undefined` builds with UBSan and no runtime of its own, each failed check a ca trap (3-system/sanitizer/).
 
 ## `config/architecture.hpp`
 
@@ -490,6 +495,32 @@ auto main(void) -> int {
 ```
 
 1 if the target OS is `os` (`linux`, `macos`), else 0. Other platforms fail to compile.
+
+## `config/sanitizer.hpp`
+
+### macro `ca_sanitizer`
+
+```c++
+#define ca_sanitizer(name) (ca_sanitizer_impl_##name())
+```
+
+1 if the code is built with the sanitizer `name` (`address`: -fsanitize=address), else 0.
+
+### macro `ca_no_sanitize`
+
+```c++
+#    define ca_no_sanitize(name) clang::no_sanitize(#name)
+```
+
+An attribute, inside `[[...]]`: the function is not instrumented by the sanitizer `name` (`address`, `undefined`, ...). Nothing in a build without it.
+
+### macro `ca_memory_poisoning`
+
+```c++
+#    define ca_memory_poisoning ca_sanitizer(address)
+```
+
+`ca_memory_poisoning`: 1 under ASan unless defined to 0, else 0. ca's own allocators (ca::basic_heap, ca::arena) then mark for ASan what they do not hand out: free blocks, the room of a chunk past its last block, what a scope's pop released. A use of it is reported as a use after poison.
 
 ## `debug/`
 
@@ -943,11 +974,19 @@ Literals take a suffix when unsigned (`0U`, `1U`), and sizes are `usz` even wher
 
 ## `integers/bits.hpp`
 
+### variable `byte_bits`
+
+```c++
+inline constexpr ca::usz byte_bits = ca::impl::count_byte_bits();
+```
+
+Bits in a byte, deduced by shifting a set bit out of ca::byte.
+
 ### variable `bits`
 
 ```c++
 template <typename T>
-inline constexpr ca::usz bits = sizeof(T) * __CHAR_BIT__;
+inline constexpr ca::usz bits = sizeof(T) * ca::byte_bits;
 ```
 
 Bits in the object representation of T.
@@ -1361,6 +1400,32 @@ Copies count bytes from `from` to `to`; the ranges may overlap (memmove). count 
 ## `memory/placement_new.hpp`
 
 Placement operator new tagged with ca::impl::placement, so it cannot collide with \<new>. The one declaration outside namespace ca; use ca::construct_at.
+
+## `memory/poison.hpp`
+
+### function `impl::poison_bytes`
+
+```c++
+[[gnu::always_inline]] inline auto poison_bytes([[maybe_unused]] const void* const address, [[maybe_unused]] const ca::usz count) noexcept -> void;
+```
+
+Hooks of an allocator for ASan, nothing unless ca_memory_poisoning: count bytes at address marked unusable, an access then reported; ASan poisons only the 8-byte granules the range covers whole.
+
+### function `impl::unpoison_bytes`
+
+```c++
+[[gnu::always_inline]] inline auto unpoison_bytes([[maybe_unused]] const void* const address, [[maybe_unused]] const ca::usz count) noexcept -> void;
+```
+
+count bytes at address usable again.
+
+### function `impl::is_poisoned`
+
+```c++
+[[nodiscard, gnu::always_inline]] inline auto is_poisoned([[maybe_unused]] const void* const address) noexcept -> bool;
+```
+
+Whether the byte at address is poisoned; false unless ca_memory_poisoning.
 
 ## `memory/relocate_n.hpp`
 

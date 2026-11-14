@@ -1,5 +1,6 @@
 // expect: error value accessed without a check
 // mode: debug
+// sanitize: !undefined !coverage !address
 #include "5-collections/array/dynamic_array.hpp"
 
 auto main(void) -> int {

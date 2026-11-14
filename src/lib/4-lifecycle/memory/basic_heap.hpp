@@ -24,6 +24,7 @@
 #define ca_lifecycle_memory_basic_heap_hpp
 
 #include "1-primitives/config/debug.hpp"
+#include "1-primitives/config/sanitizer.hpp"
 #include "1-primitives/integers/u32.hpp"
 #include "1-primitives/integers/u64.hpp"
 #include "1-primitives/integers/usz.hpp"
@@ -56,7 +57,8 @@ namespace ca {
 	/* @DOC A stateless allocator of size classes over spans of Pages, one heap per context of
 	   Binding: no lock and no atomic on a context's own blocks, one atomic exchange for a block
 	   freed away from its heap. Usable size is the class size. Debug builds check that a block
-	   goes back with its size class and alignment, and poison it. */
+	   goes back with its size class and alignment, and poison it. Under ca_memory_poisoning,
+	   ASan sees what is not handed out (impl/heap_span.hpp) and a block freed twice traps. */
 	template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
 	class basic_heap final {
 
@@ -129,6 +131,7 @@ namespace ca {
 					span_type* const span = heap->_queues._spans[index];
 					void* const block = span->_free;
 					if (block != nullptr) [[likely]] {
+						ca::impl::unpoison_bytes(block, span->_size);
 						span->_free = *static_cast<void**>(block);
 						++span->_used;
 						if constexpr (G::CHECK_DOUBLE_FREE)
@@ -149,12 +152,15 @@ namespace ca {
 					const auto pin = binding_type::pin();
 					state_type* const owner = binding_type::current();
 					if (span->_heap == owner) [[likely]] {
+						if constexpr (ca_memory_poisoning)
+							self::_check_live(block);
 						if constexpr (ca_debug != 0)
 							self::_check(span, block, alignment);
 						if constexpr (G::CHECK_DOUBLE_FREE)
 							ca::impl::heap_unmark<G>(span, block.data());
 						void* const head = span->_free;
 						*static_cast<void**>(block.data()) = head;
+						ca::impl::poison_bytes(block.data(), span->_size);
 						span->_free = block.data();
 						--span->_used;
 						owner->_counters.remove_blocks(span->_class, 1U);
@@ -200,6 +206,8 @@ namespace ca {
 			[[gnu::noinline]] static auto _settle(span_type* span) noexcept -> void;
 
 			static auto _check(const span_type* span, ca::allocation block, ca::usz alignment) noexcept -> void;
+
+			static auto _check_live(ca::allocation block) noexcept -> void;
 
 	}; // class basic_heap
 

@@ -4,9 +4,9 @@
 #define ca_include_config_hpp
 
 #include "1-primitives/config/architecture.hpp"
-#include "1-primitives/config/compiler.hpp"
 #include "1-primitives/config/debug.hpp"
 #include "1-primitives/config/has_builtin.hpp"
 #include "1-primitives/config/platform.hpp"
+#include "1-primitives/config/sanitizer.hpp"
 
 #endif // ca_include_config_hpp

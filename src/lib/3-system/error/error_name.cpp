@@ -34,6 +34,14 @@
 		case ca::errc::not_supported.code():    return "not_supported";
 		case ca::errc::address_family_not_supported.code(): return "address_family_not_supported";
 		case ca::errc::connection_refused.code(): return "connection_refused";
+		case ca::errc::address_in_use.code():   return "address_in_use";
+		case ca::errc::address_not_available.code(): return "address_not_available";
+		case ca::errc::connection_aborted.code(): return "connection_aborted";
+		case ca::errc::connection_reset.code(): return "connection_reset";
+		case ca::errc::already_connected.code(): return "already_connected";
+		case ca::errc::not_connected.code():    return "not_connected";
+		case ca::errc::already_in_progress.code(): return "already_in_progress";
+		case ca::errc::in_progress.code():      return "in_progress";
 		case ca::errc::not_implemented.code():  return "not_implemented";
 		case ca::errc::timed_out.code():        return "timed_out";
 		case ca::errc::not_recoverable.code():  return "not_recoverable";

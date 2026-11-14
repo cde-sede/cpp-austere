@@ -10,6 +10,7 @@ Layer 3: the boundary with the operating system. Everything ca needs from the ke
 - `ca::trace`: the per-thread error trace, so an error can say where it came from.
 - `ca::fs` options: the open flags as compile-time options (see `option_set`, layer 2).
 - text: float formatting, the one piece of formatting that needs the C library.
+- sanitizer: the UBSan handlers of a build without UBSan's runtime, each check a ca trap.
 
 ### Nothing of libc leaks
 
@@ -1883,13 +1884,18 @@ Whether clofork is SUPPORTED: set() and open() report errc::not_supported otherw
 
 ## `io/`
 
-Descriptor plumbing beyond plain reads and writes: pipes, waiting on several descriptors, scatter and gather I/O, terminals.
+Descriptor plumbing beyond plain reads and writes: pipes, waiting on several descriptors (poll, epoll), wakeup counters, scatter and gather I/O, terminals.
 
 | Function | Does |
 |---|---|
 | `sys::pipe(flags)` | a new pipe, as `pipe_ends` (`read_end()`, `write_end()`); flags from `ca::fs` |
 | `sys::dup2(fd, target)` | makes target a copy of fd (the copy is not close-on-exec) |
 | `sys::poll(entries, timeout_ms)` | waits for events on `poll_entry`s; -1 waits forever, 0 not at all |
+| `sys::epoll_create(flags)` | a new epoll descriptor (Linux) |
+| `sys::epoll_add(epfd, fd, events, data)`, `epoll_modify`, `epoll_remove(epfd, fd)` | what epfd watches: `epoll_events` bits, a 64-bit word handed back with each report |
+| `sys::epoll_wait(epfd, reported, timeout_ns)` | fills `epoll_event`s (`events()`, `data()`, `has(bits)`); nanosecond timeout, -1 forever |
+| `sys::eventfd(initial, flags)` | a counter descriptor, readable while nonzero: one thread wakes another's wait |
+| `sys::eventfd_write(fd, value)`, `sys::eventfd_read(fd)` | adds to the counter, takes it whole |
 | `sys::readv(fd, buffers)`, `sys::writev(fd, buffers)` | one call over several `io_buffer`s |
 | `sys::isatty(fd)` | whether fd is a terminal |
 | `sys::get_terminal_size(fd)` | rows and columns of the terminal fd is attached to |
@@ -1958,6 +1964,44 @@ auto main(void) -> int {
 
 An `io_buffer` has the layout of `struct iovec`, so an array of them goes to the kernel as is, and it converts from anything a byte span is made from: text, char arrays, strings. The caller closes both ends of a pipe.
 
+### epoll
+
+`poll` takes the whole set on every call; epoll keeps it in the kernel, so a wait costs what is ready, not what is watched. Each registration carries a 64-bit word (an index, a pointer) handed back with its reports. `epoll_events` holds the bits: `readable`, `writable`, `urgent`, `peer_closed`, the always-reported `error` and `hangup`, and the modes `edge` (report changes only: drain until `try_again`), `oneshot` (report once, then rearm with `epoll_modify`) and `exclusive`. An `epoll_event` has the kernel's layout, packed on x86-64, so `epoll_wait` fills an array in place; its timeout is in nanoseconds (epoll_pwait2, milliseconds rounded up on kernels without it). An `eventfd` counter makes waits wakeable: another thread `eventfd_write`s, the waiter's epoll reports it readable, `eventfd_read` resets it. `ca::io::reactor` (layer 6) is an event loop over both. Linux only: `errc::not_supported` elsewhere.
+
+```c++
+#include "ca/error.hpp"
+#include "ca/file.hpp"
+#include "ca/fs.hpp"
+#include "ca/io.hpp"
+#include "ca/sv.hpp"
+
+auto main(void) -> int {
+	const int flags = ca::fs::cloexec_t::OPEN_VALUE | ca::fs::nonblock_t::OPEN_VALUE;
+	auto ep = ca::sys::epoll_create(ca::fs::cloexec_t::OPEN_VALUE);
+	auto ends = ca::sys::pipe(flags);
+	auto wake = ca::sys::eventfd(0U, flags);
+	if (!ep || !ends || !wake)
+		return 1;
+	if (!ca::sys::epoll_add(*ep, ends->read_end(), ca::sys::epoll_events::readable, 1U)
+	 || !ca::sys::epoll_add(*ep, *wake, ca::sys::epoll_events::readable, 2U))
+		return 2;
+	if (!ca::sys::write(ends->write_end(), ca::sv::str{"x"}) || !ca::sys::eventfd_write(*wake, 1U))
+		return 3;
+	ca::sys::epoll_event reported[4];
+	auto ready = ca::sys::epoll_wait(*ep, reported, 1000000000);
+	if (!ready || *ready != 2U || reported[0].data() + reported[1].data() != 3U)
+		return 4;
+	auto count = ca::sys::eventfd_read(*wake);
+	if (!count || *count != 1U)
+		return 5;
+	auto idle = ca::sys::epoll_wait(*ep, reported, 1000000);
+	if (!idle || *idle != 1U || reported[0].data() != 1U)
+		return 6;
+	return ca::sys::close(*wake) && ca::sys::close(ends->read_end()) && ca::sys::close(ends->write_end())
+		&& ca::sys::close(*ep) ? 0 : 7;
+}
+```
+
 ## `io/dup2.hpp`
 
 ### function `dup2`
@@ -1977,6 +2021,122 @@ Makes target a copy of fd, closing what target held; the copy is not close-on-ex
 ```
 
 Puts the terminal fd is attached to in raw mode (terminal_settings::raw), discarding unread input; returns the settings it had, for tcsetattr to restore.
+
+## `io/epoll_add.hpp`
+
+### function `epoll_add`
+
+```c++
+[[nodiscard]] auto epoll_add(int epfd, int fd, ca::u32 events, ca::u64 data) noexcept -> ca::result<void>;
+```
+
+Starts epoll descriptor epfd watching fd for events (sys::epoll_events), each report carrying data. errc::exists when epfd already watches fd; errc::not_permitted for a descriptor epoll cannot watch (a regular file, a directory).
+
+## `io/epoll_create.hpp`
+
+### function `epoll_create`
+
+```c++
+[[nodiscard]] auto epoll_create(int flags) noexcept -> ca::result<int>;
+```
+
+A new epoll descriptor (epoll_create1), watching nothing yet. flags: 0 or the OPEN_VALUE of fs::cloexec; any other bit fails with errc::invalid_argument. Linux only: errc::not_supported elsewhere. The caller closes it with sys::close.
+
+## `io/epoll_event.hpp`
+
+### class `epoll_event`
+
+```c++
+class [[gnu::packed]] epoll_event final;
+```
+
+What an epoll registration asks for (sys::epoll_events) and the word it hands back with each report (data: an index, a pointer as an integer). Same layout as struct epoll_event, packed on x86-64 as the kernel has it, so arrays pass to the kernel uncopied.
+
+### function `epoll_event::epoll_event::events`
+
+```c++
+[[nodiscard]] constexpr auto events(void) const noexcept -> ca::u32;
+```
+
+Events requested, or reported once epoll_wait filled it.
+
+### function `epoll_event::epoll_event::has`
+
+```c++
+[[nodiscard]] constexpr auto has(const ca::u32 events) const noexcept -> bool;
+```
+
+Whether any of events is set.
+
+## `io/epoll_events.hpp`
+
+### namespace `epoll_events`
+
+```c++
+namespace epoll_events;
+```
+
+epoll event bits, without \<sys/epoll.h>; checked against it when the library builds. readable to peer_closed are requested and reported (error and hangup are always reported, requested or not); edge, oneshot, exclusive and wakeup change how a registration reports: edge only on changes (drain until errc::try_again), oneshot once then disabled until epoll_modify, exclusive one waiter woken among several epolls.
+
+## `io/epoll_modify.hpp`
+
+### function `epoll_modify`
+
+```c++
+[[nodiscard]] auto epoll_modify(int epfd, int fd, ca::u32 events, ca::u64 data) noexcept -> ca::result<void>;
+```
+
+Replaces the events and data epfd watches fd for, rearming a oneshot registration. errc::no_entry when epfd does not watch fd.
+
+## `io/epoll_remove.hpp`
+
+### function `epoll_remove`
+
+```c++
+[[nodiscard]] auto epoll_remove(int epfd, int fd) noexcept -> ca::result<void>;
+```
+
+Stops epfd watching fd. Closing fd removes it too, once no other descriptor (dup, fork) refers to the same open file. errc::no_entry when epfd does not watch fd.
+
+## `io/epoll_wait.hpp`
+
+### function `epoll_wait`
+
+```c++
+[[nodiscard]] auto epoll_wait(int epfd, ca::span<ca::sys::epoll_event> reported, ca::i64 timeout_ns) noexcept -> ca::result<ca::usz>;
+```
+
+Waits until a descriptor epfd watches reports events, or timeout_ns passes (negative: forever, 0: no wait); fills the first entries of reported (the events and the data given at registration) and returns how many, 0 on timeout. Nanosecond timeouts through epoll_pwait2, milliseconds rounded up without it. An empty span fails with errc::invalid_argument. Interrupted by a signal: errc::interrupted, left to the caller, who knows the remaining time.
+
+## `io/eventfd.hpp`
+
+### function `eventfd`
+
+```c++
+[[nodiscard]] auto eventfd(ca::u32 initial, int flags) noexcept -> ca::result<int>;
+```
+
+A new event counter descriptor starting at initial: eventfd_write adds to it, eventfd_read takes it whole; it polls readable while nonzero, so one thread can wake another's poll or epoll. flags: 0, or the OPEN_VALUE of fs::cloexec and fs::nonblock; any other bit fails with errc::invalid_argument. Linux only: errc::not_supported elsewhere. The caller closes it with sys::close.
+
+## `io/eventfd_read.hpp`
+
+### function `eventfd_read`
+
+```c++
+[[nodiscard]] auto eventfd_read(int fd) noexcept -> ca::result<ca::u64>;
+```
+
+Takes eventfd counter fd: returns its value and resets it to 0. At 0 it waits, or, nonblocking, fails with errc::try_again; interrupted calls are restarted.
+
+## `io/eventfd_write.hpp`
+
+### function `eventfd_write`
+
+```c++
+[[nodiscard]] auto eventfd_write(int fd, ca::u64 value) noexcept -> ca::result<void>;
+```
+
+Adds value to eventfd counter fd. Past 2^64 - 2 it waits for a read, or, nonblocking, fails with errc::try_again (the counter as it was: a wake is pending anyway); interrupted calls are restarted.
 
 ## `io/get_terminal_size.hpp`
 
@@ -2251,6 +2411,34 @@ Writes buffers in order, as one write; returns how many bytes. count is at most 
 ## `io/impl/`
 
 `terminal_layout.hpp`: the friend of `terminal_settings` that knows struct termios. On Linux the settings already have the kernel's layout (checked field by field against `<asm/termbits.h>`), so `tcgetattr` and `tcsetattr` hand them to the TCGETS and TCSETS ioctls as they are, and the copies go unused. Elsewhere `to_native` and `from_native` copy to and from libc's `termios`, whose flag words are wider and whose speeds are separate fields, kept in the settings so a round trip leaves them unchanged.
+
+## `io/impl/apply_open_flags.hpp`
+
+### function `impl::apply_open_flags`
+
+```c++
+[[nodiscard]] auto apply_open_flags(int fd, int flags) noexcept -> ca::result<void>;
+```
+
+Sets fs::cloexec and fs::nonblock (their OPEN_VALUE in flags) on fd with fcntl, for systems that cannot set them when fd is made. The caller closes fd on failure.
+
+## `io/impl/epoll_control.hpp`
+
+### variable `impl::epoll_op_add`
+
+```c++
+inline constexpr int epoll_op_add    = 1;
+```
+
+EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD; checked against \<sys/epoll.h>.
+
+### function `impl::epoll_control`
+
+```c++
+[[nodiscard]] auto epoll_control(int epfd, int op, int fd, ca::sys::epoll_event* event) noexcept -> ca::result<void>;
+```
+
+epoll_ctl(epfd, op, fd, event); event null for remove.
 
 ## `io/impl/terminal_layout.hpp`
 
@@ -2644,6 +2832,7 @@ Memory from the system: page mappings, and the C allocator for code that must in
 | `sys::madvise(region, advice)` | `normal`, `random`, `sequential`, `will_need`, `dont_need` |
 | `sys::msync(mapping)` | writes a shared file mapping back and waits |
 | `sys::munmap(mapping)` | unmaps a mapping, or some pages of one |
+| `sys::shm_create(size)`, `shm_attach(id, size)`, `shm_detach(mapping)`, `shm_remove(id)` | a System V shared memory segment, as X11's MIT-SHM shares with the X server |
 
 A mapping is a `span<byte>`: functions return one and take one, so the size always travels with the address. Regions must be page-aligned; an unaligned one fails with `errc::invalid_argument`. `protection` holds the bits `read`, `write`, `execute` and `none`. On Linux x86-64 the calls go straight to the kernel through `ca::syscall`, without libc.
 
@@ -3041,6 +3230,40 @@ enum class remapping;
 
 Whether mremap must keep the mapping at its address (in_place) or may move it.
 
+## `memory/shared_segment.hpp`
+
+### function `shm_create`
+
+```c++
+[[nodiscard]] auto shm_create(ca::usz size) noexcept -> ca::result<int>;
+```
+
+A new System V shared memory segment of size bytes, private (IPC_PRIVATE), readable and writable by the owner only; returns its id. It outlives the process until shm_remove: mark it removed once every party attached it, and the kernel frees it when the last one detaches. What X11's MIT-SHM extension shares with the X server.
+
+### function `shm_attach`
+
+```c++
+[[nodiscard]] auto shm_attach(int id, ca::usz size) noexcept -> ca::result<ca::span<ca::byte>>;
+```
+
+Maps segment id, of size bytes (as created), into the process, read and write.
+
+### function `shm_detach`
+
+```c++
+[[nodiscard]] auto shm_detach(ca::span<ca::byte> mapping) noexcept -> ca::result<void>;
+```
+
+Unmaps a segment mapping, as returned by shm_attach.
+
+### function `shm_remove`
+
+```c++
+[[nodiscard]] auto shm_remove(int id) noexcept -> ca::result<void>;
+```
+
+Marks segment id for removal (IPC_RMID): freed once no one has it attached, and no longer attachable by id on Linux once removed and unattached.
+
 ## `memory/sharing.hpp`
 
 ### enum `sharing`
@@ -3053,17 +3276,60 @@ Whether writes to a file mapping reach the file and other mappings (shared), or 
 
 ## `net/`
 
-IPv4 UDP sockets: datagrams between endpoints, on raw syscalls on Linux x86-64 and libc elsewhere. Sockets are plain descriptors, closed with `sys::close`.
+IPv4 sockets, TCP streams and UDP datagrams, and Unix stream sockets, on raw syscalls on Linux x86-64 and libc elsewhere. Sockets are plain descriptors, closed with `sys::close`; `read`, `write_all`, `poll`, `epoll_*` and the layer 6 readers, writers and reactor work on them as on any descriptor.
 
 | Function | Does |
 |---|---|
-| `sys::udp_socket(flags)` | a new IPv4 UDP socket; flags from `ca::fs` (cloexec, nonblock) as for `sys::pipe` |
+| `sys::tcp_listen(endpoint, backlog, flags)` | a TCP socket listening on endpoint, address reuse on: socket, bind, listen |
+| `sys::tcp_connect(endpoint, flags)` | a TCP socket connected to endpoint; with `nonblock`, returned while connecting |
+| `sys::accept(fd, flags)` | the next queued connection, as a new socket; flags apply to it |
+| `sys::unix_listen(path, backlog, flags)` | a Unix stream socket listening at path (`'\0'` first: abstract name) |
+| `sys::unix_connect(path, flags)` | a Unix stream socket connected to path |
+| `sys::tcp_socket(flags)`, `sys::udp_socket(flags)` | a new IPv4 socket, neither bound nor connected |
 | `sys::bind(fd, endpoint)` | gives the socket its local endpoint; port 0 lets the system pick |
-| `sys::local_endpoint(fd)` | the endpoint the socket is bound to |
+| `sys::listen(fd, backlog)` | makes a stream socket accept connections; backlog -1: the system's cap |
+| `sys::connect(fd, endpoint)` | connects; nonblocking: `in_progress`, then `socket_error` once writable |
+| `sys::local_endpoint(fd)`, `sys::peer_endpoint(fd)` | the endpoint the socket is bound to, the one it talks to |
+| `sys::socket_error(fd)` | takes the socket's pending error (SO_ERROR): how a nonblocking connect ended |
+| `sys::set_socket_option(fd, option, on)` | `socket_option::reuse_address`, `reuse_port`, `keep_alive`, `no_delay` |
+| `sys::shutdown(fd, side)` | ends `shutdown_side::read`, `write` (the peer reads end of stream) or `both` |
 | `sys::send_to(fd, bytes, endpoint)` | sends one datagram |
-| `sys::receive_from(fd, buffer)` | receives one datagram, as a `datagram` (`size`, `from`) |
+| `sys::receive_from(fd, buffer)` | receives one datagram, as a `datagram` (`size`, `truncated`, `from`) |
 
-`ipv4_endpoint` is an address and a port in host order: `ipv4_endpoint{127, 0, 0, 1, 8000}`, `ipv4_endpoint::loopback(port)`, `ipv4_endpoint::any(port)`; `address()`, `octet(i)`, `port()`. On a nonblocking socket, `send_to` with a full buffer and `receive_from` with nothing queued fail with `errc::try_again`; `sys::poll` waits for either. Interrupted calls are restarted.
+Flags are those of `ca::fs` for `sys::pipe`: 0, or the OPEN_VALUE of `cloexec` and `nonblock` (atomic on Linux, by fcntl elsewhere). `ipv4_endpoint` is an address and a port in host order: `ipv4_endpoint{127, 0, 0, 1, 8000}`, `ipv4_endpoint::loopback(port)`, `ipv4_endpoint::any(port)`; `address()`, `octet(i)`, `port()`.
+
+On a nonblocking socket, a call that would wait fails with `errc::try_again` (`accept` with nothing queued, `send_to` with a full buffer, `receive_from` with nothing queued), except `connect`, which fails with `errc::in_progress` while the connection goes on: the socket polls writable when it is done, and `socket_error` says how it ended (ok, or `connection_refused`, `timed_out`, ...). Interrupted calls are restarted; a blocking `connect` that a signal interrupts waits for the connection, which the kernel continues. Failures name the cause: `address_in_use` (another socket listens there), `connection_refused`, `connection_reset`, `not_connected`, `address_family_not_supported` (an endpoint asked of a socket that is not IPv4).
+
+```c++
+#include "ca/file.hpp"
+#include "ca/fs.hpp"
+#include "ca/net.hpp"
+#include "ca/sv.hpp"
+
+auto main(void) -> int {
+	const int cloexec = ca::fs::cloexec_t::OPEN_VALUE;
+	auto server = ca::sys::tcp_listen(ca::sys::ipv4_endpoint::loopback(0U), -1, cloexec);
+	if (!server)
+		return 1;
+	auto address = ca::sys::local_endpoint(*server);
+	if (!address || address->port() == 0U)
+		return 2;
+	auto client = ca::sys::tcp_connect(*address, cloexec);
+	if (!client)
+		return 3;
+	auto peer = ca::sys::accept(*server, cloexec);
+	if (!peer || !ca::sys::write_all(*client, ca::sv::str{"ping"}))
+		return 4;
+	if (!ca::sys::shutdown(*client, ca::sys::shutdown_side::write))
+		return 5;
+	char got[8];
+	auto n = ca::sys::read(*peer, got);
+	auto end = ca::sys::read(*peer, got);
+	if (!n || *n != 4U || !end || *end != 0U)
+		return 6;
+	return ca::sys::close(*peer) && ca::sys::close(*client) && ca::sys::close(*server) ? 0 : 7;
+}
+```
 
 ```c++
 #include "ca/file.hpp"
@@ -3089,6 +3355,16 @@ auto main(void) -> int {
 }
 ```
 
+## `net/accept.hpp`
+
+### function `accept`
+
+```c++
+[[nodiscard]] auto accept(int fd, int flags) noexcept -> ca::result<int>;
+```
+
+The next connection queued on listening socket fd, as a new connected socket; its peer is peer_endpoint(). flags (the OPEN_VALUE of fs::cloexec and fs::nonblock, as for udp_socket) apply to the new socket, not fd. A nonblocking listener with nothing queued fails with errc::try_again; interrupted calls are restarted; a connection reset while queued fails with errc::connection_aborted, and the next call takes the one after.
+
 ## `net/bind.hpp`
 
 ### function `bind`
@@ -3099,6 +3375,16 @@ auto main(void) -> int {
 
 Gives socket fd the local endpoint (port 0: one the system picks, see local_endpoint).
 
+## `net/connect.hpp`
+
+### function `connect`
+
+```c++
+[[nodiscard]] auto connect(int fd, ca::sys::ipv4_endpoint endpoint) noexcept -> ca::result<void>;
+```
+
+Connects stream socket fd to endpoint (a datagram socket: sets its default peer). Blocking: returns once connected, or with the reason it was not (errc::connection_refused, errc::timed_out, ...); a signal does not stop the connection, which is waited for. A nonblocking socket fails with errc::in_progress while the connection goes on: it is done when fd polls writable, and socket_error(fd) says how it ended.
+
 ## `net/datagram.hpp`
 
 ### struct `datagram`
@@ -3107,7 +3393,7 @@ Gives socket fd the local endpoint (port 0: one the system picks, see local_endp
 struct datagram final;
 ```
 
-What receive_from got: the bytes written into the buffer and who sent them. A datagram longer than the buffer is cut to it; the rest is lost.
+What receive_from got: the bytes written into the buffer, whether the datagram was longer than the buffer (cut to it, the rest lost) and who sent it.
 
 ## `net/ipv4_endpoint.hpp`
 
@@ -3167,7 +3453,7 @@ The address as one integer, host order.
 [[nodiscard]] constexpr auto octet(const ca::u32 index) const noexcept -> ca::u8;
 ```
 
-Byte index of the dotted form, 0 to 3, a.b.c.d.
+Byte index of the dotted form, 0 to 3, a.b.c.d; traps past 3.
 
 ### function `ipv4_endpoint::port`
 
@@ -3177,6 +3463,16 @@ Byte index of the dotted form, 0 to 3, a.b.c.d.
 
 The port, host order.
 
+## `net/listen.hpp`
+
+### function `listen`
+
+```c++
+[[nodiscard]] auto listen(int fd, int backlog) noexcept -> ca::result<void>;
+```
+
+Makes stream socket fd accept connections, up to backlog of them queued before accept takes them (the system caps it; negative: the cap). An unbound socket gets a port the system picks.
+
 ## `net/local_endpoint.hpp`
 
 ### function `local_endpoint`
@@ -3185,7 +3481,17 @@ The port, host order.
 [[nodiscard]] auto local_endpoint(int fd) noexcept -> ca::result<ca::sys::ipv4_endpoint>;
 ```
 
-The local endpoint socket fd is bound to (getsockname).
+The local endpoint socket fd is bound to (getsockname). A socket that is not IPv4 fails with errc::address_family_not_supported.
+
+## `net/peer_endpoint.hpp`
+
+### function `peer_endpoint`
+
+```c++
+[[nodiscard]] auto peer_endpoint(int fd) noexcept -> ca::result<ca::sys::ipv4_endpoint>;
+```
+
+The endpoint connected socket fd talks to (getpeername). errc::not_connected when it is not; a socket that is not IPv4 fails with errc::address_family_not_supported.
 
 ## `net/receive_from.hpp`
 
@@ -3195,7 +3501,7 @@ The local endpoint socket fd is bound to (getsockname).
 [[nodiscard]] auto receive_from(int fd, ca::span<ca::byte> buffer) noexcept -> ca::result<ca::sys::datagram>;
 ```
 
-Receives one datagram into buffer: its size (cut to the buffer) and its sender. A nonblocking socket with nothing queued fails with errc::try_again; interrupted calls are restarted.
+Receives one datagram into buffer: its size (cut to the buffer), whether it was cut and its sender. A socket that is not IPv4 fails with errc::address_family_not_supported; a nonblocking socket with nothing queued fails with errc::try_again; interrupted calls are restarted.
 
 ## `net/send_to.hpp`
 
@@ -3207,6 +3513,86 @@ Receives one datagram into buffer: its size (cut to the buffer) and its sender. 
 
 Sends bytes as one datagram to endpoint; returns the bytes sent (all of them for UDP). A nonblocking socket whose buffer is full fails with errc::try_again; interrupted calls are restarted.
 
+## `net/set_socket_option.hpp`
+
+### function `set_socket_option`
+
+```c++
+[[nodiscard]] auto set_socket_option(int fd, ca::sys::socket_option option, bool on) noexcept -> ca::result<void>;
+```
+
+Turns option on or off for socket fd (setsockopt). reuse_address and reuse_port take effect at the next bind; no_delay on a socket that is not TCP fails with errc::not_supported or errc::invalid_argument, as the system says.
+
+## `net/shutdown.hpp`
+
+### function `shutdown`
+
+```c++
+[[nodiscard]] auto shutdown(int fd, ca::sys::shutdown_side side) noexcept -> ca::result<void>;
+```
+
+Ends one direction of connected socket fd, or both, for every descriptor of it: write sends the peer an end of stream (its reads return 0) once queued bytes are out; read makes later reads return 0. fd stays open: close it still. errc::not_connected when it is not.
+
+## `net/shutdown_side.hpp`
+
+### enum `shutdown_side`
+
+```c++
+enum class shutdown_side;
+```
+
+Which direction of a connection shutdown ends.
+
+## `net/socket_error.hpp`
+
+### function `socket_error`
+
+```c++
+[[nodiscard]] auto socket_error(int fd) noexcept -> ca::result<void>;
+```
+
+Takes socket fd's pending error (SO_ERROR), clearing it: ok when there is none, that error as the failure otherwise. A nonblocking connect that failed with errc::in_progress is done once fd polls writable; this says how it ended.
+
+## `net/socket_option.hpp`
+
+### enum `socket_option`
+
+```c++
+enum class socket_option;
+```
+
+On/off socket options for set_socket_option. reuse_address: bind a listener to a port whose old connections still linger (SO_REUSEADDR); reuse_port: several sockets bound to one port, connections spread among them, one listener per thread (SO_REUSEPORT); keep_alive: probe idle connections (SO_KEEPALIVE); no_delay: send small writes at once instead of coalescing them (TCP_NODELAY).
+
+## `net/tcp_connect.hpp`
+
+### function `tcp_connect`
+
+```c++
+[[nodiscard]] auto tcp_connect(ca::sys::ipv4_endpoint endpoint, int flags) noexcept -> ca::result<int>;
+```
+
+A new TCP socket connected to endpoint: tcp_socket(flags) then connect. Without fs::nonblock it returns connected or fails, the socket closed. With it, it returns as soon as the connection is started: the socket polls writable when it is done, and socket_error says how it ended. The caller closes it with sys::close.
+
+## `net/tcp_listen.hpp`
+
+### function `tcp_listen`
+
+```c++
+[[nodiscard]] auto tcp_listen(ca::sys::ipv4_endpoint endpoint, int backlog, int flags) noexcept -> ca::result<int>;
+```
+
+A new TCP socket listening on endpoint (port 0: one the system picks, see local_endpoint), with socket_option::reuse_address on so a restarted server gets its port back: tcp_socket(flags), bind, listen(backlog). errc::address_in_use when another socket listens there. The caller closes it with sys::close.
+
+## `net/tcp_socket.hpp`
+
+### function `tcp_socket`
+
+```c++
+[[nodiscard]] auto tcp_socket(int flags) noexcept -> ca::result<int>;
+```
+
+A new IPv4 TCP socket, neither bound nor connected. flags as for udp_socket. The caller closes it with sys::close.
+
 ## `net/udp_socket.hpp`
 
 ### function `udp_socket`
@@ -3215,7 +3601,53 @@ Sends bytes as one datagram to endpoint; returns the bytes sent (all of them for
 [[nodiscard]] auto udp_socket(int flags) noexcept -> ca::result<int>;
 ```
 
-A new IPv4 UDP socket. flags: 0, or the OPEN_VALUE of fs::cloexec and fs::nonblock (atomically on Linux). The caller closes it with sys::close.
+A new IPv4 UDP socket. flags: 0, or the OPEN_VALUE of fs::cloexec and fs::nonblock (atomically on Linux); any other bit fails with errc::invalid_argument. The caller closes it with sys::close.
+
+## `net/unix_connect.hpp`
+
+### function `unix_connect`
+
+```c++
+[[nodiscard]] auto unix_connect(ca::sv::str path, int flags) noexcept -> ca::result<int>;
+```
+
+A new Unix stream socket connected to the socket at path; a path starting with '\0' names one in Linux's abstract namespace. flags: 0, or the OPEN_VALUE of fs::cloexec and fs::nonblock, as for udp_socket. Connecting to a Unix socket does not wait for the peer: it is done when the call returns, or, with nonblock and the listener's backlog full, fails with errc::try_again. errc::name_too_long when path does not fit a sockaddr_un. The caller closes it with sys::close; read, write_all and poll work on it as on any descriptor.
+
+## `net/unix_listen.hpp`
+
+### function `unix_listen`
+
+```c++
+[[nodiscard]] auto unix_listen(ca::sv::str path, int backlog, int flags) noexcept -> ca::result<int>;
+```
+
+A new Unix stream socket listening at path ('\0' first: an abstract name, gone with the socket), backlog as for listen, flags as for unix_connect. A filesystem path makes a socket file, which stays after close: unlink it; one already there fails with errc::address_in_use. errc::name_too_long when path does not fit a sockaddr_un. The caller closes it with sys::close.
+
+## `net/impl/`
+
+Socket plumbing shared by the `ca::sys` net wrappers, without system headers in any header.
+
+- `sockaddr_ipv4` and `sockaddr_unix`: struct sockaddr_in and sockaddr_un as the platform lays them out, with `to_sockaddr` / `from_sockaddr` / `checked_endpoint` for `ipv4_endpoint` and `to_sockaddr(path, out)` for Unix paths (abstract names included); layouts checked against `<netinet/in.h>` and `<sys/un.h>` in the sibling `.cpp` files.
+- `socket_constants`: `IPPROTO_TCP`, `TCP_NODELAY`, `SHUT_*`, `SOL_SOCKET` and the `SO_*` options ca sets, per platform, checked against the system headers.
+- `open_socket(family, type, protocol, flags)`: socket() with the `fs::cloexec` / `fs::nonblock` flag check every socket constructor shares (atomic on Linux, fcntl elsewhere), and `discard_socket(fd)` for closing a socket after a failure that is returned instead.
+
+## `net/impl/open_socket.hpp`
+
+### function `impl::open_socket`
+
+```c++
+[[nodiscard]] auto open_socket(int family, int type, int protocol, int flags) noexcept -> ca::result<int>;
+```
+
+socket(family, type, protocol) with flags the OPEN_VALUE of fs::cloexec and fs::nonblock (atomically on Linux, by fcntl elsewhere); any other bit fails with errc::invalid_argument.
+
+### function `impl::discard_socket`
+
+```c++
+auto discard_socket(int fd) noexcept -> void;
+```
+
+Closes fd after a failure that is returned instead.
 
 ## `net/impl/sockaddr_ipv4.hpp`
 
@@ -3225,7 +3657,7 @@ A new IPv4 UDP socket. flags: 0, or the OPEN_VALUE of fs::cloexec and fs::nonblo
 inline constexpr int address_family_ipv4 = 2;
 ```
 
-AF_INET, SOCK_DGRAM and IPPROTO_UDP; checked against the system headers.
+AF_INET, SOCK_DGRAM and IPPROTO_UDP; checked against the system headers. SOCK_STREAM is in sockaddr_unix.hpp, IPPROTO_TCP in socket_constants.hpp.
 
 ### struct `impl::sockaddr_ipv4`
 
@@ -3250,6 +3682,66 @@ endpoint as a sockaddr_ipv4.
 ```
 
 The endpoint a sockaddr_ipv4 holds.
+
+### function `impl::checked_endpoint`
+
+```c++
+[[nodiscard]] constexpr auto checked_endpoint(const ca::sys::impl::sockaddr_ipv4& address, const ca::usz length) noexcept -> ca::result<ca::sys::ipv4_endpoint>;
+```
+
+The endpoint in address as the kernel filled length bytes of it; anything but a whole IPv4 address fails with errc::address_family_not_supported.
+
+## `net/impl/sockaddr_unix.hpp`
+
+### variable `impl::address_family_unix`
+
+```c++
+inline constexpr int address_family_unix = 1;
+```
+
+AF_UNIX and SOCK_STREAM; checked against the system headers.
+
+### variable `impl::unix_path_capacity`
+
+```c++
+inline constexpr ca::usz unix_path_capacity = 108U;
+```
+
+Bytes of a socket path, its terminating zero included.
+
+### struct `impl::sockaddr_unix`
+
+```c++
+struct sockaddr_unix final;
+```
+
+struct sockaddr_un as the platform lays it out, checked against \<sys/un.h>.
+
+### function `impl::to_sockaddr`
+
+```c++
+[[nodiscard]] constexpr auto to_sockaddr(const ca::sv::str path, ca::sys::impl::sockaddr_unix& out) noexcept -> ca::result<ca::usz>;
+```
+
+Fills out with path ('\0' first: an abstract name); returns the length to pass with it, which counts the path without a terminating zero. errc::name_too_long when path is empty or does not fit.
+
+## `net/impl/socket_constants.hpp`
+
+### variable `impl::protocol_tcp`
+
+```c++
+inline constexpr int protocol_tcp = 6;
+```
+
+IPPROTO_TCP, TCP_NODELAY and the SHUT_* values; checked against the system headers.
+
+### variable `impl::socket_level`
+
+```c++
+inline constexpr int socket_level = 1;
+```
+
+SOL_SOCKET and the SO_* options ca sets or reads.
 
 ## `process/`
 

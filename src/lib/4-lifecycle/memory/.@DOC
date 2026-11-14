@@ -8,6 +8,7 @@ an arena, or on fresh pages.
 | `ca::page_allocator` | stateless | whole pages per block, zeroed, grown by remapping without copying |
 | `ca::libc_allocator` | stateless | malloc, realloc and free: the baseline benchmarks compare with |
 | `ca::arena_allocator` | stateful | blocks of a `ca::arena`, released all at once |
+| `ca::arena_scope` | stateful | temporaries of a `ca::arena`, released by `pop()`; results kept through `result()` |
 
 ### The allocator contract
 
@@ -91,6 +92,52 @@ auto main(void) -> int {
 }
 ```
 
+### Arena scopes
+
+`arena.push()` opens a scope and returns it as an allocator, `ca::arena_scope` (two pointers):
+what it allocates are temporaries, all released by its `pop()`, chunks included but one kept for
+the next growth. What must outlive the pop is allocated, explicitly, through `scope.result()`: an
+`arena_allocator` over the enclosing scope (or the arena itself), which the pop does not touch.
+Nothing is copied or moved, so results may be whole structures: containers of containers, nodes
+pointing at each other. `scope.push()` opens a nested scope, whose results are temporaries of
+`scope`, so each level hands its results up exactly one level.
+
+Scopes alternate between the two lanes of the arena: a scope's temporaries share a lane with its
+parent's results, and its results with its parent's temporaries. The rule follows: allocate only
+through the innermost scope, or through its `result()`. Allocating through an enclosing scope (or
+`arena.allocator()`) while a nested scope is open puts the block where the nested pop releases it.
+After `pop()`, the scope, its copies and its blocks are not used again; popping a scope pops the
+scopes nested in it, and a pop whose mark is already gone traps.
+
+```c++
+#include "ca/dynamic_array.hpp"
+#include "ca/make_in.hpp"
+#include "ca/memory.hpp"
+
+auto main(void) -> int {
+	auto made = ca::arena::make();
+	if (!made)
+		return 1;
+	ca::arena& arena = *made;
+
+	const ca::arena_scope scope = arena.push();
+	auto squares = ca::make_in<ca::dynamic_array<int>>(scope);
+	auto evens = ca::make_in<ca::dynamic_array<int>>(scope.result());
+	if (!squares || !evens)
+		return 2;
+	for (int i = 0; i < 1000; ++i)
+		if (!squares->append(i * i))
+			return 3;
+	for (const int square : *squares)
+		if (square % 2 == 0 && !evens->append(square))
+			return 4;
+	scope.pop();
+
+	const bool ok = evens->size() == 500U && (*evens)[499] == 998 * 998;
+	return ok && arena.cleanup() ? 0 : 5;
+}
+```
+
 `ca::allocator_of<R>`, `ca::as_allocator(source)` and `ca::is_allocator_source` unify the two
 kinds of source, so `make_in` takes either an allocator or a resource.
 
@@ -159,3 +206,16 @@ auto main(void) -> int {
 	return my_heap::statistics().small_blocks() == 0U ? 0 : 3;
 }
 ```
+
+### Under ASan
+
+ASan sees the pages `ca::heap` and `ca::arena` map, not the blocks they carve from them. With
+`ca_memory_poisoning` (on under `-fsanitize=address`, `make SAN=address`) they mark for it what
+they do not hand out: a free block of the heap, link word included, the uncarved room of a span,
+a spare span; an arena chunk's room past its newest block, the padding between blocks, what a
+`deallocate` or a scope's `pop()` gave back, a spare chunk. Reading or writing there is reported
+as a use after poison, with the stack of the access; a pointer kept past `pop()`, or a block
+allocated through an enclosing scope while a nested one is open (the arena scope rule), shows at
+its next use. A heap block freed twice traps, whatever the geometry. Memory going back to the
+kernel is unpoisoned first, for whoever maps the range next. Every other build compiles the
+hooks to nothing.

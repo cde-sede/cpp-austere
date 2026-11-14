@@ -3,7 +3,6 @@
 #ifndef ca_include_integers_hpp
 #define ca_include_integers_hpp
 
-#include "1-primitives/integers/byte.hpp"
 #include "1-primitives/integers/i16.hpp"
 #include "1-primitives/integers/i32.hpp"
 #include "1-primitives/integers/i64.hpp"

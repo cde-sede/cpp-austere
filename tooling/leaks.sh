@@ -8,7 +8,8 @@
 #             stdc-predef.h) is not ours and is subtracted.
 #   symbols   every external symbol LIB defines is mangled inside namespace
 #             ca (functions, inline variables, guards, thread-locals), except
-#             the C functions ca provides in libc's place (C_SYMBOLS).
+#             the C functions ca provides in libc's place (C_SYMBOLS) and the weak UBSan
+#             handlers (__ubsan_handle_*, 3-system/sanitizer/ubsan.cpp).
 #   helpers   no compiler runtime helper (libgcc's __popcountdi2, __udivti3, ...):
 #             programs linked without libc link no libgcc either.
 #   layer 1   every object of 1-primitives references only symbols inside ca:
@@ -35,7 +36,7 @@ for header in $(find src/lib -name '*.hpp' | sort); do
 done
 
 symbols=$(nm -g --defined-only "$LIB" 2>/dev/null | awk 'NF == 3 { print $3 }' \
-	| grep -v -E "$inside_ca" | grep -v -x -F "$(printf '%s\n' $C_SYMBOLS)")
+	| grep -v -E "$inside_ca" | grep -v -x -F "$(printf '%s\n' $C_SYMBOLS)" | grep -v -E '^__ubsan_handle_[a-z0-9_]+$')
 if [ -n "$symbols" ]; then
 	printf '  LEAK  %s defines symbols outside ca:\n' "$LIB"
 	printf '%s\n' "$symbols" | sed 's/^/          /'

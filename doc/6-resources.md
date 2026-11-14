@@ -63,9 +63,9 @@ A dynamic loader of ca's own, in `ca::dl`: it loads ELF64 x86-64 shared objects 
 A symbol a library leaves undefined resolves, in order, to:
 
 - the program's explicit offers (the `host` argument, `dl::host_symbol`: a name and an address), which always win;
+- the loader's built-ins (`__tls_get_addr`), before the program's exports: an ASan program exports the sanitizer's own `__tls_get_addr`, which knows nothing of these modules;
 - the library's own definition, when it is linked `-Bsymbolic` (DT_SYMBOLIC);
 - what the running program exports, as ld.so puts the executable first in the global scope: the defined, non-local symbols of its dynamic symbol table (`elf::image::program()`, read once on the first load). A program exports its functions and variables when linked with `-Wl,--export-dynamic` (`-rdynamic`); without it, only what the shared libraries it was linked against reference (under libc: `environ`, copy-relocated data). A static non-PIE program exports nothing: GNU ld gives it no dynamic section, even with `--export-dynamic`;
-- the loader's built-ins (`__tls_get_addr`);
 - the first definition in the scope of the library loaded: itself, then what it needs, breadth first.
 
 An undefined weak symbol is 0. Hidden symbol versions are skipped; other versions are not checked. Indirect functions (STT_GNU_IFUNC) are resolved by calling their resolver, the program's included. A thread-local variable the program exports cannot be bound: the program's own block sits next to the thread pointer and has no module id in the loader's table. A library's reference to one goes on to the library's scope, so a copy the library defines itself (an inline `thread_local`) is used; when only the program defines it, the load fails with `errc::not_supported` naming the variable.
@@ -623,7 +623,7 @@ Closes. The descriptor is gone even on failure; a closed one succeeds.
 
 ## `io/`
 
-Buffered I/O over file descriptors, and the process's standard streams.
+Buffered I/O over file descriptors, the process's standard streams, and an event loop (`io::reactor`) driving many descriptors from one thread.
 
 | Type | Buffer | Descriptor |
 |---|---|---|
@@ -739,6 +739,136 @@ auto main(void) -> int {
 ### Standard streams
 
 `io::out()` is this thread's standard output: a 4 KiB buffer, line policy on a terminal and full otherwise, opened on first use, flushed when the thread exits and, for the thread that calls `exit` (returning from `main` included), at exit; `exit_immediately` and crashes drop it. Being per thread, it needs no lock, and each message reaches fd 1 whole. `io::err()` is unbuffered: each message is one write as it happens. `io::in()` is the process's standard input, one per process, so read it from one thread at a time.
+
+### Reactor
+
+`io::reactor` is an event loop over epoll, owned by the thread that runs it. It calls handlers the caller owns, each a class deriving from a base templated on itself:
+
+| Base | Registered by | Calls |
+|---|---|---|
+| `io::watcher<Self>` | `watch(w, fd, interest)`, `change`, `unwatch` | `on_readable(reactor&)`, `on_writable(reactor&)`, optionally `on_hangup(reactor&)` |
+| `io::timer<Self>` | `schedule_at(t, deadline_ns)`, `schedule_after(t, delay_ns)`, `cancel` | `on_timer(reactor&)`, once per scheduling |
+| `io::task<Self>` | `post(t)`, from any thread | `on_posted(reactor&)`, on the reactor's thread |
+
+The reactor allocates nothing: the handlers hold their links (24 to 56 bytes) and the reactor their addresses, so a handler stays put while watched, scheduled or posted. A handler may do anything to the reactor, itself included: unwatch itself and be destroyed, reschedule itself (a periodic timer), watch new descriptors (an accepted connection). Unwatching drops the handler's pending events of the current round too, so a closed connection is never called again.
+
+`interest` bits are `readable`, `writable` and `none`, level-triggered: a handler is called while its descriptor stays ready, so one read per call is enough. A buffered reader may hold more than the descriptor shows, though, so a handler parsing with `read_until` loops until `try_again`. `interest::edge` switches a watch to edge triggering (called on changes only: drain until `try_again`). The usual write path stays readable-only: write, `write_pending()`; on `try_again`, `clear_error()` and `change` to `readable | writable`; `on_writable` writes the rest and drops writable again. Errors and hangups go to `on_hangup` when Self has one, otherwise to its other handlers as readiness (the next read returns 0 or the error).
+
+`run()` loops until `stop()` or until nothing is left: no watch, no timer, no posted task. A round is one epoll_wait (its timeout the nearest timer deadline, in nanoseconds), the ready handlers, the due timers, then the posted tasks. One reactor per thread scales out: each thread runs its own, with listeners bound through `socket_option::reuse_port`, or one acceptor handing descriptors to the others in posted tasks. `post`, `wake` and `stop` are the only members other threads may call; `post` is one CAS and, at most once per round, an eventfd write.
+
+```c++
+#include "ca/buffering.hpp"
+#include "ca/error.hpp"
+#include "ca/file.hpp"
+#include "ca/format_to.hpp"
+#include "ca/fs.hpp"
+#include "ca/interest.hpp"
+#include "ca/net.hpp"
+#include "ca/optional.hpp"
+#include "ca/reactor.hpp"
+#include "ca/stream.hpp"
+#include "ca/sv.hpp"
+#include "ca/timer.hpp"
+#include "ca/watcher.hpp"
+
+struct watchdog final : ca::io::timer<watchdog> {
+
+	bool fired = false;
+
+	auto on_timer(ca::io::reactor& r) noexcept -> void {
+		fired = true;
+		r.stop();
+	}
+
+};
+
+struct connection final : ca::io::watcher<connection> {
+
+	int fd;
+	char input[256];
+	char output[256];
+	ca::io::stream stream;
+	watchdog* dog;
+
+	connection(const int socket, watchdog* const d) noexcept
+	: fd{socket}, input{}, output{}, stream{socket, ca::io::buffering::full, input, output}, dog{d} {
+	}
+
+	auto finish(ca::io::reactor& r) noexcept -> void {
+		(void)stream.flush();
+		(void)r.unwatch(*this);
+		(void)ca::sys::close(fd);
+		r.cancel(*dog);
+	}
+
+	auto on_readable(ca::io::reactor& r) noexcept -> void {
+		for (;;) {
+			auto line = stream.read_until('\n');
+			if (!line) {
+				if (line.error() != ca::errc::try_again)
+					finish(r);
+				return;
+			}
+			if (line->size() == 0U || !ca::format_to(stream, "{}", *line) || !stream.write_pending()) {
+				finish(r);
+				return;
+			}
+		}
+	}
+
+};
+
+struct listener final : ca::io::watcher<listener> {
+
+	int fd = -1;
+	watchdog* dog = nullptr;
+	ca::optional<connection>* slot = nullptr;
+
+	auto on_readable(ca::io::reactor& r) noexcept -> void {
+		auto peer = ca::sys::accept(fd, ca::fs::cloexec_t::OPEN_VALUE | ca::fs::nonblock_t::OPEN_VALUE);
+		if (!peer)
+			return;
+		connection& c = *slot->emplace(*peer, dog);
+		if (!r.watch(c, *peer, ca::io::interest::readable))
+			r.stop();
+		(void)r.unwatch(*this);
+	}
+
+};
+
+auto main(void) -> int {
+	auto made = ca::io::reactor::make();
+	if (!made)
+		return 1;
+	ca::io::reactor& r = *made;
+	const int cloexec = ca::fs::cloexec_t::OPEN_VALUE;
+	auto server = ca::sys::tcp_listen(ca::sys::ipv4_endpoint::loopback(0U), -1, cloexec | ca::fs::nonblock_t::OPEN_VALUE);
+	auto address = server ? ca::sys::local_endpoint(*server) : server.propagate();
+	if (!server || !address)
+		return 2;
+	auto client = ca::sys::tcp_connect(*address, cloexec);
+	if (!client || !ca::sys::write_all(*client, ca::sv::str{"hello\n"}) || !ca::sys::shutdown(*client, ca::sys::shutdown_side::write))
+		return 3;
+
+	watchdog dog{};
+	ca::optional<connection> slot{};
+	listener l{};
+	l.fd = *server;
+	l.dog = &dog;
+	l.slot = &slot;
+	if (!r.watch(l, *server, ca::io::interest::readable))
+		return 4;
+	r.schedule_after(dog, 1000000000);
+	if (!r.run() || dog.fired)
+		return 5;
+
+	char reply[16];
+	auto n = ca::sys::read(*client, reply);
+	if (!n || ca::sv::str{reply, *n} != ca::sv::str{"hello\n"})
+		return 6;
+	return ca::sys::close(*client) && ca::sys::close(*server) && r.cleanup() ? 0 : 7;
+}
+```
 
 ## `io/buffered_reader.hpp`
 
@@ -979,6 +1109,16 @@ This thread's standard error (fd 2), unbuffered: each message is one write as it
 
 The process's standard input (fd 0), 4 KiB buffer, tied to the calling thread's ca::io::out() so a pending prompt shows before input is awaited. One per process (a buffer per thread would split stdin between threads): read it from one thread at a time.
 
+## `io/interest.hpp`
+
+### namespace `interest`
+
+```c++
+namespace interest;
+```
+
+What a reactor watches a descriptor for, combined with |. Level-triggered by default: a watcher is called while the descriptor stays ready, so one read per call is enough. edge: called once per change instead, so each call must read (or write) until errc::try_again; it saves the syscalls that toggling writable costs. Errors and hangups are reported whatever is asked, none included.
+
 ## `io/out.hpp`
 
 ### function `out`
@@ -988,6 +1128,178 @@ The process's standard input (fd 0), 4 KiB buffer, tied to the calling thread's 
 ```
 
 This thread's standard output (fd 1), 4 KiB buffer, line policy on a terminal, full otherwise. Opened on first use. Flushed when the thread exits and, for the thread calling exit() (returning from main included), at exit; ca::sys::exit_immediately and a crash drop it. Per thread, so no lock: each message reaches fd 1 whole, in the order its thread flushes. After fork(), flush in one process only.
+
+## `io/reactor.hpp`
+
+Event loop over epoll: descriptors, timers and tasks posted from other threads, calling intrusive handlers (ca::io::watcher\<Self>, ca::io::timer\<Self>, ca::io::task\<Self>).
+
+Performance:
+
+- Layout: the epoll and eventfd descriptors, counts, the timer heap root, the posted-task stack head and a batch of 64 epoll_event (12 bytes each on x86-64): 848 bytes on x86-64, in the object. Nothing is allocated: handlers carry their own links, 24 bytes in a watcher, 56 in a timer, 24 in a task.
+- A round is one epoll_wait for up to 64 events, then each event's handler through one indirect call (the node's address is the epoll word, no lookup), then due timers, then posted tasks.
+- watch/change/unwatch: one epoll_ctl each; change skips it when the interest is the same. unwatch during a round also clears the node's later events in the batch (at most 63 words compared).
+- Timers: a pairing heap through the timers. schedule O(1), the earliest O(1), firing or cancelling O(log n) amortized. The nearest deadline is the epoll_pwait2 timeout, in nanoseconds: no timerfd, no syscall per timer.
+- post: one CAS onto a lock-free stack, and one eventfd write only when the reactor has not been woken since it last took the stack. The reactor takes the whole stack with one exchange per round, only when it is not empty.
+
+### class `reactor`
+
+```c++
+class reactor final;
+```
+
+An event loop owned by the thread that runs it: it watches descriptors (watch), calls timers when due (schedule_at, schedule_after) and runs tasks other threads post. Every member is for the running thread only, except post, wake and stop, which any thread may call. Handlers are the caller's objects (watcher, timer, task): the reactor allocates nothing and keeps their addresses, so each stays put and alive while watched, scheduled or posted. A handler may watch, unwatch, schedule and cancel anything, itself included, and destroy itself once it unwatched itself, but never runs the reactor (run, run_once) from inside a round. make() then cleanup(); not movable once anything is watched, scheduled or posted.
+
+### function `reactor::reactor`
+
+```c++
+reactor(void) noexcept;
+```
+
+Not live: what moving and cleanup() leave.
+
+### function `reactor::reactor`
+
+```c++
+reactor(self&& other) noexcept;
+```
+
+Takes other's descriptors. Traps when other has anything watched, scheduled or posted: their handlers know its address.
+
+### function `reactor::make`
+
+```c++
+[[nodiscard]] static auto make(void) noexcept -> ca::result<self>;
+```
+
+A new reactor: an epoll descriptor and an eventfd for wakeups, both close-on-exec. errc::not_supported off Linux.
+
+### function `reactor::is_live`
+
+```c++
+[[nodiscard]] constexpr auto is_live(void) const noexcept -> bool;
+```
+
+Whether make() opened it and cleanup() has not closed it.
+
+### function `reactor::watched`
+
+```c++
+[[nodiscard]] constexpr auto watched(void) const noexcept -> ca::usz;
+```
+
+Descriptors watched.
+
+### function `reactor::scheduled`
+
+```c++
+[[nodiscard]] constexpr auto scheduled(void) const noexcept -> ca::usz;
+```
+
+Timers scheduled.
+
+### function `reactor::native`
+
+```c++
+[[nodiscard]] constexpr auto native(void) const noexcept -> int;
+```
+
+The epoll descriptor, to nest this reactor in another poll.
+
+### function `reactor::watch`
+
+```c++
+[[nodiscard]] auto watch(ca::io::impl::watch_node& w, int fd, ca::u32 interest) noexcept -> ca::result<void>;
+```
+
+Starts watching fd for interest (ca::io::interest bits), calling w's handlers; w must not be watched already (errc::busy). fd stays the caller's: unwatch before closing it. errc::exists when this reactor watches fd through another watcher; errc::not_permitted for a descriptor epoll cannot watch (a regular file).
+
+### function `reactor::change`
+
+```c++
+[[nodiscard]] auto change(ca::io::impl::watch_node& w, ca::u32 interest) noexcept -> ca::result<void>;
+```
+
+Replaces what w is watched for, typically adding interest::writable while a writer has bytes pending and dropping it once they are out. No syscall when unchanged. errc::invalid_argument when this reactor does not watch w.
+
+### function `reactor::unwatch`
+
+```c++
+[[nodiscard]] auto unwatch(ca::io::impl::watch_node& w) noexcept -> ca::result<void>;
+```
+
+Stops watching w: none of its handlers is called after this, not even for events of the current round. w is unwatched even on failure (the epoll_ctl error, fd already closed for instance). errc::invalid_argument when this reactor does not watch w.
+
+### function `reactor::schedule_at`
+
+```c++
+auto schedule_at(ca::io::impl::timer_node& t, ca::i64 deadline) noexcept -> void;
+```
+
+Calls t once sys::now(clock::monotonic) reaches deadline (nanoseconds); a scheduled t moves to the new deadline. Timers due together run by deadline, then in the order they were scheduled. A timer scheduled by a timer of the round, already due, runs in the next round, after I/O. Traps when t is scheduled on another reactor.
+
+### function `reactor::schedule_after`
+
+```c++
+auto schedule_after(ca::io::impl::timer_node& t, ca::i64 delay) noexcept -> void;
+```
+
+schedule_at(t, now + delay), delay in nanoseconds.
+
+### function `reactor::cancel`
+
+```c++
+auto cancel(ca::io::impl::timer_node& t) noexcept -> bool;
+```
+
+Unschedules t; whether it was scheduled here.
+
+### function `reactor::post`
+
+```c++
+[[nodiscard]] auto post(ca::io::impl::task_node& t) noexcept -> ca::result<void>;
+```
+
+Any thread: runs t on the reactor's thread, in the round after this call at the latest, waking the reactor if it waits. Posting t while posted does nothing: it runs once. Tasks posted from one thread run in the order posted. t stays alive until it has run, and the reactor until every post returned. Fails only when the wakeup cannot be written (the eventfd error); t is posted then all the same.
+
+### function `reactor::wake`
+
+```c++
+[[nodiscard]] auto wake(void) noexcept -> ca::result<void>;
+```
+
+Any thread: makes a waiting round end now.
+
+### function `reactor::stop`
+
+```c++
+auto stop(void) noexcept -> void;
+```
+
+Any thread: run() returns at the end of the current round (at once when called before it). Events already taken from epoll are dispatched first, so none is lost.
+
+### function `reactor::run`
+
+```c++
+[[nodiscard]] auto run(void) noexcept -> ca::result<void>;
+```
+
+Rounds until stop() or nothing is left to wait for: no descriptor watched, no timer scheduled, no task posted. A thread that expects posts only keeps a watcher or a timer. Interrupted waits are resumed. The first error of a wait returns.
+
+### function `reactor::run_once`
+
+```c++
+[[nodiscard]] auto run_once(ca::i64 timeout) noexcept -> ca::result<ca::usz>;
+```
+
+One round: waits up to timeout nanoseconds (negative: forever, 0: no wait) for events, less when a timer is due sooner or a task is posted, then calls their handlers; returns how many handlers ran. errc::interrupted when a signal ended the wait (due timers and posted tasks run first).
+
+### function `reactor::cleanup`
+
+```c++
+[[nodiscard]] auto cleanup(void) noexcept -> ca::result<void>;
+```
+
+Closes both descriptors: not live after, even on failure. errc::busy, nothing closed, while descriptors are watched or timers scheduled; posted tasks that have not run never will.
 
 ## `io/reader.hpp`
 
@@ -1226,6 +1538,39 @@ See ca::io::reader::read.
 
 See ca::io::writer::write.
 
+## `io/task.hpp`
+
+### class `task`
+
+```c++
+template <typename Self>
+class task : public ca::io::impl::task_node;
+```
+
+Base of work handed to a reactor from any thread, Self deriving from task\<Self>: reactor::post queues it and the reactor's thread calls Self's public on_posted(ca::io::reactor&), no longer posted by then, so it may be posted again. The way other threads reach a reactor's watchers and timers. A copy of a task is not posted; a posted one stays alive until it has run.
+
+## `io/timer.hpp`
+
+### class `timer`
+
+```c++
+template <typename Self>
+class timer : public ca::io::impl::timer_node;
+```
+
+Base of a timer, Self deriving from timer\<Self>: reactor::schedule_at and schedule_after arm it, and the reactor calls Self's public on_timer(ca::io::reactor&) once when it is due, unscheduled by then, so on_timer may schedule it again (a periodic timer). A copy of a timer is not scheduled; cancel one before destroying it.
+
+## `io/watcher.hpp`
+
+### class `watcher`
+
+```c++
+template <typename Self>
+class watcher : public ca::io::impl::watch_node;
+```
+
+Base of a descriptor handler, Self deriving from watcher\<Self>; reactor::watch registers it. Self has public on_readable(ca::io::reactor&), on_writable(reactor&) or both, called when the descriptor is ready for what it is watched for, and optionally on_hangup(reactor&), called instead when the descriptor reports an error or a hangup; without it those go to every handler Self has, whatever the interest, as readiness (the next read returns 0 or the error), so a level-triggered failure never spins unhandled. When both are ready, on_readable runs first, and on_writable only if on_readable left it watched. A copy of a watcher is not watched; unwatch one before destroying it.
+
 ## `io/writer.hpp`
 
 Buffered output to a file descriptor.
@@ -1403,6 +1748,96 @@ auto _keep(const char* const from) noexcept -> void;
 ```
 
 Pending becomes [from, _at), moved to the front.
+
+## `io/impl/`
+
+The parts of the reactor's handlers that the reactor itself touches, kept out of the handler templates so `io::reactor` is one non-template class.
+
+| Node | Holds | Used by |
+|---|---|---|
+| `watch_node` | dispatch function, owning reactor, descriptor, interest | `io::watcher<Self>`; its address is the epoll word |
+| `timer_node` | dispatch function, owning reactor, deadline, scheduling sequence, pairing-heap links (first child, next sibling, previous sibling or parent) | `io::timer<Self>` |
+| `task_node` | dispatch function, link in the posted stack, an atomic posted flag | `io::task<Self>` |
+
+Each `Self` base passes a static function that casts the node back to `Self` and calls its handlers, so a dispatch is one indirect call and no virtual table exists. Only the reactor writes the links (it is their friend). A copy of a node is never registered and assigning one leaves both registrations as they were: registrations belong to the place, as `list_link`'s do.
+
+## `io/impl/task_node.hpp`
+
+### class `impl::task_node`
+
+```c++
+class task_node;
+```
+
+What a reactor keeps of a ca::io::task: its link in the reactor's lock-free stack of posted tasks, whether it is in it, and how to call the task. A copy is not posted.
+
+### function `impl::task_node::is_posted`
+
+```c++
+[[nodiscard]] auto is_posted(void) const noexcept -> bool;
+```
+
+Whether it is posted and has not started running. Any thread may ask; the answer may be stale by the time it is used.
+
+## `io/impl/timer_node.hpp`
+
+### class `impl::timer_node`
+
+```c++
+class timer_node;
+```
+
+What a reactor keeps of a ca::io::timer: its deadline, its place in the reactor's pairing heap (first child, next sibling, and the previous sibling or, for a first child, the parent) and how to call the timer. A copy is not scheduled.
+
+### function `impl::timer_node::is_scheduled`
+
+```c++
+[[nodiscard]] constexpr auto is_scheduled(void) const noexcept -> bool;
+```
+
+Whether a reactor will call it.
+
+### function `impl::timer_node::deadline`
+
+```c++
+[[nodiscard]] constexpr auto deadline(void) const noexcept -> ca::i64;
+```
+
+When it is due, in sys::clock::monotonic nanoseconds; meaningful while scheduled.
+
+## `io/impl/watch_node.hpp`
+
+### class `impl::watch_node`
+
+```c++
+class watch_node;
+```
+
+What a reactor keeps of a ca::io::watcher: the descriptor, the interest and how to call the watcher. Its address is the word epoll hands back, so it stays put while watched. A copy is not watched: registrations belong to the place, not the value.
+
+### function `impl::watch_node::is_watched`
+
+```c++
+[[nodiscard]] constexpr auto is_watched(void) const noexcept -> bool;
+```
+
+Whether a reactor watches it.
+
+### function `impl::watch_node::fd`
+
+```c++
+[[nodiscard]] constexpr auto fd(void) const noexcept -> int;
+```
+
+The descriptor watched, -1 when not watched.
+
+### function `impl::watch_node::interest`
+
+```c++
+[[nodiscard]] constexpr auto interest(void) const noexcept -> ca::u32;
+```
+
+The ca::io::interest bits it is watched for.
 
 ## `print/`
 

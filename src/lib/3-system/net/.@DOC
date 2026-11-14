@@ -1,19 +1,71 @@
-IPv4 UDP sockets (datagrams between endpoints) and Unix stream connections, on raw syscalls on
-Linux x86-64 and libc elsewhere. Sockets are plain descriptors, closed with `sys::close`.
+IPv4 sockets, TCP streams and UDP datagrams, and Unix stream sockets, on raw syscalls on Linux
+x86-64 and libc elsewhere. Sockets are plain descriptors, closed with `sys::close`; `read`,
+`write_all`, `poll`, `epoll_*` and the layer 6 readers, writers and reactor work on them as on
+any descriptor.
 
 | Function | Does |
 |---|---|
-| `sys::udp_socket(flags)` | a new IPv4 UDP socket; flags from `ca::fs` (cloexec, nonblock) as for `sys::pipe` |
+| `sys::tcp_listen(endpoint, backlog, flags)` | a TCP socket listening on endpoint, address reuse on: socket, bind, listen |
+| `sys::tcp_connect(endpoint, flags)` | a TCP socket connected to endpoint; with `nonblock`, returned while connecting |
+| `sys::accept(fd, flags)` | the next queued connection, as a new socket; flags apply to it |
+| `sys::unix_listen(path, backlog, flags)` | a Unix stream socket listening at path (`'\0'` first: abstract name) |
+| `sys::unix_connect(path, flags)` | a Unix stream socket connected to path |
+| `sys::tcp_socket(flags)`, `sys::udp_socket(flags)` | a new IPv4 socket, neither bound nor connected |
 | `sys::bind(fd, endpoint)` | gives the socket its local endpoint; port 0 lets the system pick |
-| `sys::local_endpoint(fd)` | the endpoint the socket is bound to |
+| `sys::listen(fd, backlog)` | makes a stream socket accept connections; backlog -1: the system's cap |
+| `sys::connect(fd, endpoint)` | connects; nonblocking: `in_progress`, then `socket_error` once writable |
+| `sys::local_endpoint(fd)`, `sys::peer_endpoint(fd)` | the endpoint the socket is bound to, the one it talks to |
+| `sys::socket_error(fd)` | takes the socket's pending error (SO_ERROR): how a nonblocking connect ended |
+| `sys::set_socket_option(fd, option, on)` | `socket_option::reuse_address`, `reuse_port`, `keep_alive`, `no_delay` |
+| `sys::shutdown(fd, side)` | ends `shutdown_side::read`, `write` (the peer reads end of stream) or `both` |
 | `sys::send_to(fd, bytes, endpoint)` | sends one datagram |
 | `sys::receive_from(fd, buffer)` | receives one datagram, as a `datagram` (`size`, `truncated`, `from`) |
-| `sys::unix_connect(path, flags)` | a Unix stream socket connected to path (`'\0'` first: abstract name); then `read`, `write_all`, `poll` |
 
-`ipv4_endpoint` is an address and a port in host order: `ipv4_endpoint{127, 0, 0, 1, 8000}`,
-`ipv4_endpoint::loopback(port)`, `ipv4_endpoint::any(port)`; `address()`, `octet(i)`, `port()`.
-On a nonblocking socket, `send_to` with a full buffer and `receive_from` with nothing queued fail
-with `errc::try_again`; `sys::poll` waits for either. Interrupted calls are restarted.
+Flags are those of `ca::fs` for `sys::pipe`: 0, or the OPEN_VALUE of `cloexec` and `nonblock`
+(atomic on Linux, by fcntl elsewhere). `ipv4_endpoint` is an address and a port in host order:
+`ipv4_endpoint{127, 0, 0, 1, 8000}`, `ipv4_endpoint::loopback(port)`, `ipv4_endpoint::any(port)`;
+`address()`, `octet(i)`, `port()`.
+
+On a nonblocking socket, a call that would wait fails with `errc::try_again` (`accept` with
+nothing queued, `send_to` with a full buffer, `receive_from` with nothing queued), except
+`connect`, which fails with `errc::in_progress` while the connection goes on: the socket polls
+writable when it is done, and `socket_error` says how it ended (ok, or `connection_refused`,
+`timed_out`, ...). Interrupted calls are restarted; a blocking `connect` that a signal interrupts
+waits for the connection, which the kernel continues. Failures name the cause:
+`address_in_use` (another socket listens there), `connection_refused`, `connection_reset`,
+`not_connected`, `address_family_not_supported` (an endpoint asked of a socket that is not
+IPv4).
+
+```c++
+#include "ca/file.hpp"
+#include "ca/fs.hpp"
+#include "ca/net.hpp"
+#include "ca/sv.hpp"
+
+auto main(void) -> int {
+	const int cloexec = ca::fs::cloexec_t::OPEN_VALUE;
+	auto server = ca::sys::tcp_listen(ca::sys::ipv4_endpoint::loopback(0U), -1, cloexec);
+	if (!server)
+		return 1;
+	auto address = ca::sys::local_endpoint(*server);
+	if (!address || address->port() == 0U)
+		return 2;
+	auto client = ca::sys::tcp_connect(*address, cloexec);
+	if (!client)
+		return 3;
+	auto peer = ca::sys::accept(*server, cloexec);
+	if (!peer || !ca::sys::write_all(*client, ca::sv::str{"ping"}))
+		return 4;
+	if (!ca::sys::shutdown(*client, ca::sys::shutdown_side::write))
+		return 5;
+	char got[8];
+	auto n = ca::sys::read(*peer, got);
+	auto end = ca::sys::read(*peer, got);
+	if (!n || *n != 4U || !end || *end != 0U)
+		return 6;
+	return ca::sys::close(*peer) && ca::sys::close(*client) && ca::sys::close(*server) ? 0 : 7;
+}
+```
 
 ```c++
 #include "ca/file.hpp"

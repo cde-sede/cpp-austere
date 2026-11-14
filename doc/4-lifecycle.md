@@ -578,14 +578,14 @@ Whether a context can fail with E: E is ca::error, or made from one by E::of(err
 ```c++
         template <typename F>
 #if ca_compiler(gcc)
-        [[gnu::noipa]]
+        [[gnu::noipa, ca_no_sanitize(address)]]
 #else
-        [[gnu::noinline]]
+        [[gnu::noinline, ca_no_sanitize(address)]]
 #endif
         auto enter_recovery(ca::impl::recovery& point, F& body) noexcept -> bool;
 ```
 
-Sets point, makes it the thread's innermost, runs body; true when a trap came back to point. Opaque to gcc's interprocedural analysis: when body never returns normally, gcc would otherwise take the landing path for the only exit and assume body's stores never reach the caller.
+Sets point, makes it the thread's innermost, runs body; true when a trap came back to point. Opaque to gcc's interprocedural analysis: when body never returns normally, gcc would otherwise take the landing path for the only exit and assume body's stores never reach the caller. Not instrumented by ASan: its frame cleanup, run again when the trap lands back here, writes the shadow of frames the jump already left.
 
 ### function `impl::traced_error`
 
@@ -658,6 +658,7 @@ Allocators: where every allocating type of ca gets its memory. Each container, s
 | `ca::page_allocator` | stateless | whole pages per block, zeroed, grown by remapping without copying |
 | `ca::libc_allocator` | stateless | malloc, realloc and free: the baseline benchmarks compare with |
 | `ca::arena_allocator` | stateful | blocks of a `ca::arena`, released all at once |
+| `ca::arena_scope` | stateful | temporaries of a `ca::arena`, released by `pop()`; results kept through `result()` |
 
 ### The allocator contract
 
@@ -729,6 +730,41 @@ auto main(void) -> int {
 }
 ```
 
+### Arena scopes
+
+`arena.push()` opens a scope and returns it as an allocator, `ca::arena_scope` (two pointers): what it allocates are temporaries, all released by its `pop()`, chunks included but one kept for the next growth. What must outlive the pop is allocated, explicitly, through `scope.result()`: an `arena_allocator` over the enclosing scope (or the arena itself), which the pop does not touch. Nothing is copied or moved, so results may be whole structures: containers of containers, nodes pointing at each other. `scope.push()` opens a nested scope, whose results are temporaries of `scope`, so each level hands its results up exactly one level.
+
+Scopes alternate between the two lanes of the arena: a scope's temporaries share a lane with its parent's results, and its results with its parent's temporaries. The rule follows: allocate only through the innermost scope, or through its `result()`. Allocating through an enclosing scope (or `arena.allocator()`) while a nested scope is open puts the block where the nested pop releases it. After `pop()`, the scope, its copies and its blocks are not used again; popping a scope pops the scopes nested in it, and a pop whose mark is already gone traps.
+
+```c++
+#include "ca/dynamic_array.hpp"
+#include "ca/make_in.hpp"
+#include "ca/memory.hpp"
+
+auto main(void) -> int {
+	auto made = ca::arena::make();
+	if (!made)
+		return 1;
+	ca::arena& arena = *made;
+
+	const ca::arena_scope scope = arena.push();
+	auto squares = ca::make_in<ca::dynamic_array<int>>(scope);
+	auto evens = ca::make_in<ca::dynamic_array<int>>(scope.result());
+	if (!squares || !evens)
+		return 2;
+	for (int i = 0; i < 1000; ++i)
+		if (!squares->append(i * i))
+			return 3;
+	for (const int square : *squares)
+		if (square % 2 == 0 && !evens->append(square))
+			return 4;
+	scope.pop();
+
+	const bool ok = evens->size() == 500U && (*evens)[499] == 998 * 998;
+	return ok && arena.cleanup() ? 0 : 5;
+}
+```
+
 `ca::allocator_of<R>`, `ca::as_allocator(source)` and `ca::is_allocator_source` unify the two kinds of source, so `make_in` takes either an allocator or a resource.
 
 ### The heap
@@ -785,6 +821,10 @@ auto main(void) -> int {
 	return my_heap::statistics().small_blocks() == 0U ? 0 : 3;
 }
 ```
+
+### Under ASan
+
+ASan sees the pages `ca::heap` and `ca::arena` map, not the blocks they carve from them. With `ca_memory_poisoning` (on under `-fsanitize=address`, `make SAN=address`) they mark for it what they do not hand out: a free block of the heap, link word included, the uncarved room of a span, a spare span; an arena chunk's room past its newest block, the padding between blocks, what a `deallocate` or a scope's `pop()` gave back, a spare chunk. Reading or writing there is reported as a use after poison, with the stack of the access; a pointer kept past `pop()`, or a block allocated through an enclosing scope while a nested one is open (the arena scope rule), shows at its next use. A heap block freed twice traps, whatever the geometry. Memory going back to the kernel is unpoisoned first, for whoever maps the range next. Every other build compiles the hooks to nothing.
 
 ## `memory/allocate_n.hpp`
 
@@ -853,7 +893,7 @@ The allocator for a source R (see is_allocator_source): R itself when it is an a
 class arena final;
 ```
 
-Owner of chunks of pages (page_allocator) carved by bumping a pointer, all released at once: an allocator resource, handing out arena_allocator. A chunk holds chunk_size bytes, or one larger block. Moving an arena keeps its allocators valid; cleanup() or reset() invalidates every block. Not thread-safe.
+Owner of chunks of pages (page_allocator) carved by bumping a pointer, all released at once: an allocator resource, handing out arena_allocator. A chunk holds chunk_size bytes, or one larger block. push() opens a scope of temporaries (arena_scope). Moving an arena keeps its allocators and scopes valid; cleanup() or reset() invalidates every block and scope. Not thread-safe.
 
 ### function `arena::arena`
 
@@ -896,13 +936,21 @@ Whether make() built it and cleanup() has not run.
 
 An allocator over this arena. Traps on an empty arena.
 
+### function `arena::push`
+
+```c++
+[[nodiscard]] auto push(void) const noexcept -> ca::arena_scope;
+```
+
+A scope of temporaries over this arena, released by its pop(); its results are blocks of the arena, as from allocator(). Traps on an empty arena.
+
 ### function `arena::reset`
 
 ```c++
 auto reset(void) noexcept -> void;
 ```
 
-Releases every chunk but the first, and empties it: every block is gone, the allocators stay valid.
+Releases every chunk but the first, and empties it: every block and scope is gone, the allocators stay valid.
 
 ### function `arena::cleanup`
 
@@ -920,16 +968,16 @@ Releases every chunk; the arena is empty after.
 class arena_allocator final;
 ```
 
-Stateful allocator handing out blocks of an arena, one pointer wide; from arena::allocator(). Copies share the arena, which must outlive them. Allocation bumps a pointer; deallocate and expand act on the newest block only, and are no-ops on others. Not thread-safe.
+Stateful allocator handing out blocks of an arena, one pointer wide; from arena::allocator() or arena_scope::result(). Copies share the arena, which must outlive them. Allocation bumps a pointer; deallocate and expand act on the newest block only, and are no-ops on others. Not thread-safe. Under ca_memory_poisoning, the room of a chunk past its newest block, alignment padding and what a pop or a deallocate gave back are poisoned for ASan.
 
 ### function `arena_allocator::arena_allocator`
 
 ```c++
-constexpr explicit arena_allocator(ca::impl::arena_state* const state) noexcept
-: _state{state};
+constexpr explicit arena_allocator(ca::impl::arena_lane* const lane) noexcept
+: _lane{lane};
 ```
 
-Over the state of an arena; arena::allocator() builds it.
+Over a lane of an arena; arena::allocator() builds it.
 
 ### function `arena_allocator::deallocate`
 
@@ -946,6 +994,65 @@ Gives the room back when block is the newest one; otherwise nothing.
 ```
 
 The newest block grows or shrinks while its chunk has room; any block shrinks by keeping its size.
+
+## `memory/arena_scope.hpp`
+
+### class `arena_scope`
+
+```c++
+class arena_scope final;
+```
+
+Stateful allocator of temporaries, from arena::push() or push() of an enclosing scope; two pointers wide. pop() releases every block it gave since the push. What must outlive the pop is allocated through result(): blocks of the enclosing scope (or of the arena), which the pop leaves in place, so nothing moves and structures pointing into themselves survive. Scopes alternate between two lanes of the arena: a scope's temporaries share a lane with its parent's results, and its results with its parent's temporaries. Hence the rule: allocate only through the innermost scope, or through result() of it; allocating through an enclosing one while a nested scope is open puts the block in memory the nested pop releases. Copies are interchangeable, pop() through any of them; after it, neither the scope nor its copies are used again, nor its blocks deallocated, and popping the enclosing scope pops it too. A pop whose mark is gone traps. Not thread-safe.
+
+### function `arena_scope::arena_scope`
+
+```c++
+constexpr explicit arena_scope(ca::impl::arena_lane* const lane) noexcept
+: _lane{lane}, _mark{lane->_top};
+```
+
+A scope marking lane where it stands; arena::push() builds it.
+
+### function `arena_scope::result`
+
+```c++
+[[nodiscard]] constexpr auto result(void) const noexcept -> ca::arena_allocator;
+```
+
+An allocator whose blocks survive pop(): those of the enclosing scope.
+
+### function `arena_scope::deallocate`
+
+```c++
+[[gnu::always_inline]] auto deallocate(const ca::allocation block, const ca::usz alignment) const noexcept -> void;
+```
+
+Gives the room back when block is the newest one; otherwise nothing.
+
+### function `arena_scope::expand`
+
+```c++
+[[nodiscard]] auto expand(const ca::allocation block, const ca::usz size, const ca::usz alignment) const noexcept -> ca::optional<ca::allocation>;
+```
+
+The newest block grows or shrinks while its chunk has room; any block shrinks by keeping its size.
+
+### function `arena_scope::push`
+
+```c++
+[[nodiscard]] auto push(void) const noexcept -> self;
+```
+
+A scope nested in this one: its results are temporaries of this one.
+
+### function `arena_scope::pop`
+
+```c++
+auto pop(void) const noexcept -> void;
+```
+
+Releases every block of the scope, the chunks they took but one kept for the next growth. Results stay.
 
 ## `memory/as_allocator.hpp`
 
@@ -977,7 +1084,7 @@ template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <ty
 class basic_heap final;
 ```
 
-A stateless allocator of size classes over spans of Pages, one heap per context of Binding: no lock and no atomic on a context's own blocks, one atomic exchange for a block freed away from its heap. Usable size is the class size. Debug builds check that a block goes back with its size class and alignment, and poison it.
+A stateless allocator of size classes over spans of Pages, one heap per context of Binding: no lock and no atomic on a context's own blocks, one atomic exchange for a block freed away from its heap. Usable size is the class size. Debug builds check that a block goes back with its size class and alignment, and poison it. Under ca_memory_poisoning, ASan sees what is not handed out (impl/heap_span.hpp) and a block freed twice traps.
 
 ### function `basic_heap::empty_state`
 
@@ -1380,7 +1487,9 @@ Everything below is templated on the geometry `G` (`ca::is_heap_geometry`) of a 
 
 ### Arena
 
-`arena_state.hpp`: an arena's state lives in its first chunk, right after the `arena_chunk` header (previous chunk, size), so it never moves and the `arena_allocator`s, which point to it, stay valid when the `ca::arena` object itself is moved. Blocks are carved from `_top` up to `_end` of the newest chunk; a request that does not fit starts a new chunk, or gets a chunk of its own when larger than the chunk size.
+`arena_state.hpp`: an arena's state lives in its first chunk, right after the `arena_chunk` header (previous chunk, size), so it never moves and the `arena_allocator`s, which point to it, stay valid when the `ca::arena` object itself is moved. The state holds two lanes (`arena_lane`), each its own chain of chunks: blocks are carved from `_top` up to `_end` of the lane's newest chunk; a request that does not fit starts a new chunk (the lane's spare when it has one large enough), or gets a chunk of its own when larger than the chunk size. Lane 0 starts in the first chunk and serves `arena::allocator()`; lane 1 maps nothing until a scope allocates in it.
+
+An `arena_scope` is a lane and a mark, the lane's `_top` when it was pushed (null for a lane holding nothing yet); a nested scope takes the other lane (`_other`). `arena_pop` finds the chunk holding the mark, trapping when none of the lane's does or when the mark lies above `_top` in the newest one, releases the chunks after it, the oldest of the standard size kept as the lane's spare so that push and pop in a loop never remap, and puts `_top` back on the mark.
 
 ## `memory/impl/arena_state.hpp`
 
@@ -1392,13 +1501,21 @@ struct arena_chunk final;
 
 Header of every arena chunk, at its start: the chunk before it and its size.
 
+### struct `impl::arena_lane`
+
+```c++
+struct arena_lane final;
+```
+
+One bump region of an arena: blocks go from _top up to _end in its newest chunk, _spare is a released chunk of _chunk_size bytes kept for the next growth, _other the lane scopes alternate with.
+
 ### struct `impl::arena_state`
 
 ```c++
 struct arena_state final;
 ```
 
-An arena, kept in its first chunk after the chunk header so that it never moves: blocks go from _top up to _end in the newest chunk.
+An arena, kept in its first chunk after the chunk header so that it never moves: lane 0 starts in that chunk and serves arena::allocator(), lane 1 maps nothing until a scope allocates in it.
 
 ## `memory/impl/heap_classes.hpp`
 
@@ -1481,15 +1598,6 @@ template <typename Heap>
 ```
 
 The value of a span's remote list once its owner found it exhausted.
-
-### function `next_of`
-
-```c++
-template <typename Heap>
-[[nodiscard]] auto ca::impl::heap_engine<Heap>::next_of(void* const block) noexcept -> void*&;
-```
-
-The link of a free block, in its first word.
 
 ### function `usable_size`
 
@@ -1579,7 +1687,7 @@ template <typename Heap>
 auto ca::impl::heap_engine<Heap>::release(state* const heap, span* const target) noexcept -> void;
 ```
 
-An emptied span: kept as a spare while there is room, else back to pages.
+An emptied span: kept as a spare while there is room, its blocks poisoned, else back to pages, unpoisoned for whoever maps the range next.
 
 ### function `fresh_span`
 
@@ -1588,7 +1696,7 @@ template <typename Heap>
 [[nodiscard]] auto ca::impl::heap_engine<Heap>::fresh_span(state* const heap, const ca::u32 index) noexcept -> ca::result<span*>;
 ```
 
-A span for class index of heap: a spare, else new from pages, its marks cleared.
+A span for class index of heap: a spare, else new from pages, its marks cleared, its blocks poisoned until carved.
 
 ### function `collect`
 
@@ -1689,6 +1797,15 @@ auto ca::basic_heap<Pages, G, Binding>::_check(const span_type* const span, cons
 
 Debug: block starts a block of span, has its class, and is poisoned.
 
+### function `_check_live`
+
+```c++
+template <ca::is_stateless_allocator Pages, ca::is_heap_geometry G, template <typename> typename Binding>
+auto ca::basic_heap<Pages, G, Binding>::_check_live(const ca::allocation block) noexcept -> void;
+```
+
+Under ca_memory_poisoning: block, small, is in use, its first byte not poisoned; else it was freed already, or never handed out.
+
 ### function `allocate_zeroed`
 
 ```c++
@@ -1744,7 +1861,7 @@ template <typename G>
 struct alignas(64) heap_span final;
 ```
 
-Header of a heap span: G::SPAN_SIZE bytes aligned to their size, blocks of one class from the start, this header in the last bytes, so a block finds it by masking its address. The first line is the owner's alone. The second takes frees from other threads: a list of blocks, or the full mark once the owner found nothing left, frees then going to the owner's heap instead. A thread freeing a block touches the span no more after it. With G::CHECK_DOUBLE_FREE, the marks of the blocks in use (a bit per 16 bytes) sit right below the header.
+Header of a heap span: G::SPAN_SIZE bytes aligned to their size, blocks of one class from the start, this header in the last bytes, so a block finds it by masking its address. The first line is the owner's alone. The second takes frees from other threads: a list of blocks, or the full mark once the owner found nothing left, frees then going to the owner's heap instead. A thread freeing a block touches the span no more after it. With G::CHECK_DOUBLE_FREE, the marks of the blocks in use (a bit per 16 bytes) sit right below the header. Under ca_memory_poisoning, every byte of the blocks area not in use is poisoned: free blocks, links included, uncarved room, a spare span's blocks.
 
 ### variable `impl::heap_mark_words`
 
@@ -1808,6 +1925,22 @@ template <typename G>
 ```
 
 Marks block, of span, in use.
+
+### function `impl::heap_link_of`
+
+```c++
+[[nodiscard, gnu::always_inline]] inline auto heap_link_of(void* const block) noexcept -> void*;
+```
+
+The link of a free block, its first word, read; poisoned again after it (ca_memory_poisoning), as the rest of the block.
+
+### function `impl::heap_set_link`
+
+```c++
+[[gnu::always_inline]] inline auto heap_set_link(void* const block, void* const next) noexcept -> void;
+```
+
+Sets the link of a free block, poisoned after it.
 
 ### function `impl::heap_unmark`
 

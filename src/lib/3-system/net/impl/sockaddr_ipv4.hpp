@@ -26,7 +26,8 @@ namespace ca {
 
 		namespace impl {
 
-			/* @DOC AF_INET, SOCK_DGRAM and IPPROTO_UDP; checked against the system headers. */
+			/* @DOC AF_INET, SOCK_DGRAM and IPPROTO_UDP; checked against the system headers. SOCK_STREAM
+			   is in sockaddr_unix.hpp, IPPROTO_TCP in socket_constants.hpp. */
 			inline constexpr int address_family_ipv4 = 2;
 			inline constexpr int socket_datagram = 2;
 			inline constexpr int protocol_udp = 17;

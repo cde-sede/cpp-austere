@@ -73,13 +73,13 @@ c++ -std=c++2c -nostdinc++ -fno-exceptions -fno-rtti -I src/lib prog.cpp -nostdl
 
 | Layer | Headers | Documented entities |
 |---|---|---|
-| [1-primitives](1-primitives.md) | 239 | 200/200 |
+| [1-primitives](1-primitives.md) | 241 | 201/201 |
 | [2-vocabulary](2-vocabulary.md) | 67 | 20/20 |
-| [3-system](3-system.md) | 246 | 5/5 |
-| [4-lifecycle](4-lifecycle.md) | 45 | 68/68 |
+| [3-system](3-system.md) | 276 | 5/5 |
+| [4-lifecycle](4-lifecycle.md) | 46 | 69/69 |
 | [5-collections](5-collections.md) | 95 | 47/47 |
-| [6-resources](6-resources.md) | 22 | 4/4 |
-| [ca](ca.md) | 135 | 0/0 |
+| [6-resources](6-resources.md) | 30 | 4/4 |
+| [ca](ca.md) | 140 | 0/0 |
 
 ## [1-primitives](1-primitives.md)
 
@@ -111,6 +111,7 @@ Layer 1: what the language and the compiler give, wrapped once.
 - [`config/debug.hpp`](1-primitives.md#configdebughpp) - `ca_debug`: 1 unless NDEBUG is defined; define it to 0 or 1 to override.
 - [`config/has_builtin.hpp`](1-primitives.md#confighasbuiltinhpp) - `ca_has_builtin(x)`: `__has_builtin(x)`, or 0 where unsupported.
 - [`config/platform.hpp`](1-primitives.md#configplatformhpp) - 1 if the target OS is `os` (`linux`, `macos`), else 0.
+- [`config/sanitizer.hpp`](1-primitives.md#configsanitizerhpp) - 1 if the code is built with the sanitizer `name` (`address`: -fsanitize=address), else 0.
 - [`debug/assume.hpp`](1-primitives.md#debugassumehpp) - Lets the optimizer assume condition; undefined if false.
 - [`debug/frame_address.hpp`](1-primitives.md#debugframeaddresshpp)
 - [`debug/is_constant_folded.hpp`](1-primitives.md#debugisconstantfoldedhpp) - True when the optimizer proves value is a constant at this call site, after inlining (__builtin_c...
@@ -127,7 +128,7 @@ Layer 1: what the language and the compiler give, wrapped once.
 - [`hash/hash_bytes.hpp`](1-primitives.md#hashhashbyteshpp) - Hash of size bytes at data, from seed: wyhash (final 4).
 - [`hash/hash_word.hpp`](1-primitives.md#hashhashwordhpp) - Hash of a 64-bit value: one 64x64->128 multiply, every output bit depending on every input bit.
 - [`hash/impl/hash_multiply.hpp`](1-primitives.md#hashimplhashmultiplyhpp)
-- [`integers/bits.hpp`](1-primitives.md#integersbitshpp) - Bits in the object representation of T.
+- [`integers/bits.hpp`](1-primitives.md#integersbitshpp) - Bits in a byte, deduced by shifting a set bit out of ca::byte.
 - [`integers/byte.hpp`](1-primitives.md#integersbytehpp) - Unit of raw memory; may alias any object.
 - [`integers/i16.hpp`](1-primitives.md#integersi16hpp) - Signed, exactly 16 bits.
 - [`integers/i32.hpp`](1-primitives.md#integersi32hpp) - Signed, exactly 32 bits.
@@ -159,6 +160,7 @@ Layer 1: what the language and the compiler give, wrapped once.
 - [`memory/max_alignment.hpp`](1-primitives.md#memorymaxalignmenthpp) - alignof(max_align_t), from the compiler: the strictest alignment of a scalar type, and what opera...
 - [`memory/move_bytes.hpp`](1-primitives.md#memorymovebyteshpp) - Copies count bytes from `from` to `to`; the ranges may overlap (memmove).
 - [`memory/placement_new.hpp`](1-primitives.md#memoryplacementnewhpp) - Placement operator new tagged with ca::impl::placement, so it cannot collide with \<new>.
+- [`memory/poison.hpp`](1-primitives.md#memorypoisonhpp)
 - [`memory/relocate_n.hpp`](1-primitives.md#memoryrelocatenhpp) - Moves count objects from `from` into uninitialized storage at `to`, ending the lifetime of the so...
 - [`memory/relocate_overlapping_n.hpp`](1-primitives.md#memoryrelocateoverlappingnhpp) - relocate_n within one array: the ranges may overlap.
 - [`memory/string_length.hpp`](1-primitives.md#memorystringlengthhpp) - Length in code units of a NUL-terminated string, NUL excluded.
@@ -491,6 +493,16 @@ Layer 3: the boundary with the operating system.
 - [`fs/options.hpp`](3-system.md#fsoptionshpp) - Files, paths and descriptors.
 - [`io/dup2.hpp`](3-system.md#iodup2hpp) - Makes target a copy of fd, closing what target held; the copy is not close-on-exec.
 - [`io/enter_raw_mode.hpp`](3-system.md#ioenterrawmodehpp) - Puts the terminal fd is attached to in raw mode (terminal_settings::raw), discarding unread input...
+- [`io/epoll_add.hpp`](3-system.md#ioepolladdhpp) - Starts epoll descriptor epfd watching fd for events (sys::epoll_events), each report carrying data.
+- [`io/epoll_create.hpp`](3-system.md#ioepollcreatehpp) - A new epoll descriptor (epoll_create1), watching nothing yet.
+- [`io/epoll_event.hpp`](3-system.md#ioepolleventhpp) - What an epoll registration asks for (sys::epoll_events) and the word it hands back with each repo...
+- [`io/epoll_events.hpp`](3-system.md#ioepolleventshpp) - epoll event bits, without \<sys/epoll.h>; checked against it when the library builds.
+- [`io/epoll_modify.hpp`](3-system.md#ioepollmodifyhpp) - Replaces the events and data epfd watches fd for, rearming a oneshot registration.
+- [`io/epoll_remove.hpp`](3-system.md#ioepollremovehpp) - Stops epfd watching fd.
+- [`io/epoll_wait.hpp`](3-system.md#ioepollwaithpp) - Waits until a descriptor epfd watches reports events, or timeout_ns passes (negative: forever, 0:...
+- [`io/eventfd.hpp`](3-system.md#ioeventfdhpp) - A new event counter descriptor starting at initial: eventfd_write adds to it, eventfd_read takes...
+- [`io/eventfd_read.hpp`](3-system.md#ioeventfdreadhpp) - Takes eventfd counter fd: returns its value and resets it to 0.
+- [`io/eventfd_write.hpp`](3-system.md#ioeventfdwritehpp) - Adds value to eventfd counter fd.
 - [`io/get_terminal_size.hpp`](3-system.md#iogetterminalsizehpp) - Size of the terminal fd is attached to; fails on anything but a terminal.
 - [`io/io_buffer.hpp`](3-system.md#ioiobufferhpp) - One run of bytes for readv and writev.
 - [`io/isatty.hpp`](3-system.md#ioisattyhpp) - Whether fd is a terminal.
@@ -509,6 +521,8 @@ Layer 3: the boundary with the operating system.
 - [`io/terminal_settings.hpp`](3-system.md#ioterminalsettingshpp) - A terminal's settings, struct termios without <termios.h>: the four flag words (sys::terminal_inp...
 - [`io/terminal_size.hpp`](3-system.md#ioterminalsizehpp) - Size of a terminal window, in character cells.
 - [`io/writev.hpp`](3-system.md#iowritevhpp) - Writes buffers in order, as one write; returns how many bytes.
+- [`io/impl/apply_open_flags.hpp`](3-system.md#ioimplapplyopenflagshpp)
+- [`io/impl/epoll_control.hpp`](3-system.md#ioimplepollcontrolhpp)
 - [`io/impl/terminal_layout.hpp`](3-system.md#ioimplterminallayouthpp)
 - [`machine/gethostname.hpp`](3-system.md#machinegethostnamehpp) - Writes the host name into buffer, NUL-terminated; returns its length.
 - [`machine/processor_count.hpp`](3-system.md#machineprocessorcounthpp) - Processors this process may run on now (its affinity mask, as nproc counts them on Linux; the onl...
@@ -533,15 +547,33 @@ Layer 3: the boundary with the operating system.
 - [`memory/protection.hpp`](3-system.md#memoryprotectionhpp) - Page protection bits for mmap_anonymous and mprotect, without \<sys/mman.h>.
 - [`memory/reallocarray.hpp`](3-system.md#memoryreallocarrayhpp) - Resizes block (nullptr: allocates one) to count * size bytes, aligned to malloc_alignment; conten...
 - [`memory/remapping.hpp`](3-system.md#memoryremappinghpp) - Whether mremap must keep the mapping at its address (in_place) or may move it.
+- [`memory/shared_segment.hpp`](3-system.md#memorysharedsegmenthpp) - A new System V shared memory segment of size bytes, private (IPC_PRIVATE), readable and writable...
 - [`memory/sharing.hpp`](3-system.md#memorysharinghpp) - Whether writes to a file mapping reach the file and other mappings (shared), or stay in private c...
+- [`net/accept.hpp`](3-system.md#netaccepthpp) - The next connection queued on listening socket fd, as a new connected socket; its peer is peer_en...
 - [`net/bind.hpp`](3-system.md#netbindhpp) - Gives socket fd the local endpoint (port 0: one the system picks, see local_endpoint).
-- [`net/datagram.hpp`](3-system.md#netdatagramhpp) - What receive_from got: the bytes written into the buffer and who sent them.
+- [`net/connect.hpp`](3-system.md#netconnecthpp) - Connects stream socket fd to endpoint (a datagram socket: sets its default peer).
+- [`net/datagram.hpp`](3-system.md#netdatagramhpp) - What receive_from got: the bytes written into the buffer, whether the datagram was longer than th...
 - [`net/ipv4_endpoint.hpp`](3-system.md#netipv4endpointhpp) - An IPv4 address and a port, both in host order: what sockaddr_in holds, without \<netinet/in.h>.
+- [`net/listen.hpp`](3-system.md#netlistenhpp) - Makes stream socket fd accept connections, up to backlog of them queued before accept takes them...
 - [`net/local_endpoint.hpp`](3-system.md#netlocalendpointhpp) - The local endpoint socket fd is bound to (getsockname).
-- [`net/receive_from.hpp`](3-system.md#netreceivefromhpp) - Receives one datagram into buffer: its size (cut to the buffer) and its sender.
+- [`net/peer_endpoint.hpp`](3-system.md#netpeerendpointhpp) - The endpoint connected socket fd talks to (getpeername).
+- [`net/receive_from.hpp`](3-system.md#netreceivefromhpp) - Receives one datagram into buffer: its size (cut to the buffer), whether it was cut and its sender.
 - [`net/send_to.hpp`](3-system.md#netsendtohpp) - Sends bytes as one datagram to endpoint; returns the bytes sent (all of them for UDP).
+- [`net/set_socket_option.hpp`](3-system.md#netsetsocketoptionhpp) - Turns option on or off for socket fd (setsockopt).
+- [`net/shutdown.hpp`](3-system.md#netshutdownhpp) - Ends one direction of connected socket fd, or both, for every descriptor of it: write sends the p...
+- [`net/shutdown_side.hpp`](3-system.md#netshutdownsidehpp) - Which direction of a connection shutdown ends.
+- [`net/socket_error.hpp`](3-system.md#netsocketerrorhpp) - Takes socket fd's pending error (SO_ERROR), clearing it: ok when there is none, that error as the...
+- [`net/socket_option.hpp`](3-system.md#netsocketoptionhpp) - On/off socket options for set_socket_option.
+- [`net/tcp_connect.hpp`](3-system.md#nettcpconnecthpp) - A new TCP socket connected to endpoint: tcp_socket(flags) then connect.
+- [`net/tcp_listen.hpp`](3-system.md#nettcplistenhpp) - A new TCP socket listening on endpoint (port 0: one the system picks, see local_endpoint), with s...
+- [`net/tcp_socket.hpp`](3-system.md#nettcpsockethpp) - A new IPv4 TCP socket, neither bound nor connected.
 - [`net/udp_socket.hpp`](3-system.md#netudpsockethpp) - A new IPv4 UDP socket.
+- [`net/unix_connect.hpp`](3-system.md#netunixconnecthpp) - A new Unix stream socket connected to the socket at path; a path starting with '\0' names one in...
+- [`net/unix_listen.hpp`](3-system.md#netunixlistenhpp) - A new Unix stream socket listening at path ('\0' first: an abstract name, gone with the socket),...
+- [`net/impl/open_socket.hpp`](3-system.md#netimplopensockethpp)
 - [`net/impl/sockaddr_ipv4.hpp`](3-system.md#netimplsockaddripv4hpp)
+- [`net/impl/sockaddr_unix.hpp`](3-system.md#netimplsockaddrunixhpp)
+- [`net/impl/socket_constants.hpp`](3-system.md#netimplsocketconstantshpp)
 - [`process/execve.hpp`](3-system.md#processexecvehpp) - Replaces the process image with program path, arguments argv and environment envp (both null-term...
 - [`process/execvp.hpp`](3-system.md#processexecvphpp) - execve with the current environment, looking file up in $PATH when it has no '/'.
 - [`process/exit.hpp`](3-system.md#processexithpp) - Ends the process with status after atexit handlers and stdio flushing.
@@ -669,7 +701,8 @@ Layer 4: how objects are created, owned, copied and destroyed without exceptions
 - [`memory/allocation.hpp`](4-lifecycle.md#memoryallocationhpp) - A block from an allocator: its address and its usable size, at least the size asked for.
 - [`memory/allocator_of.hpp`](4-lifecycle.md#memoryallocatorofhpp) - The allocator for a source R (see is_allocator_source): R itself when it is an allocator, what R:...
 - [`memory/arena.hpp`](4-lifecycle.md#memoryarenahpp) - Owner of chunks of pages (page_allocator) carved by bumping a pointer, all released at once: an a...
-- [`memory/arena_allocator.hpp`](4-lifecycle.md#memoryarenaallocatorhpp) - Stateful allocator handing out blocks of an arena, one pointer wide; from arena::allocator().
+- [`memory/arena_allocator.hpp`](4-lifecycle.md#memoryarenaallocatorhpp) - Stateful allocator handing out blocks of an arena, one pointer wide; from arena::allocator() or a...
+- [`memory/arena_scope.hpp`](4-lifecycle.md#memoryarenascopehpp) - Stateful allocator of temporaries, from arena::push() or push() of an enclosing scope; two pointe...
 - [`memory/as_allocator.hpp`](4-lifecycle.md#memoryasallocatorhpp) - A copy of source when it is an allocator, source.allocator() when it is a resource.
 - [`memory/basic_heap.hpp`](4-lifecycle.md#memorybasicheaphpp) - The heap engine behind ca::heap, for heaps that get their pages, their notion of "current" and th...
 - [`memory/deallocate_n.hpp`](4-lifecycle.md#memorydeallocatenhpp) - Hands back a block from allocate_n\<T> or a resize of it.
@@ -813,10 +846,18 @@ Layer 6: objects backed by the operating system, and the services a program uses
 - [`io/buffering.hpp`](6-resources.md#iobufferinghpp) - When a writer writes its buffer out: full when it fills (or on flush), line also after every mess...
 - [`io/err.hpp`](6-resources.md#ioerrhpp) - This thread's standard error (fd 2), unbuffered: each message is one write as it happens.
 - [`io/in.hpp`](6-resources.md#ioinhpp) - The process's standard input (fd 0), 4 KiB buffer, tied to the calling thread's ca::io::out() so...
+- [`io/interest.hpp`](6-resources.md#iointeresthpp) - What a reactor watches a descriptor for, combined with |.
 - [`io/out.hpp`](6-resources.md#ioouthpp) - This thread's standard output (fd 1), 4 KiB buffer, line policy on a terminal, full otherwise.
+- [`io/reactor.hpp`](6-resources.md#ioreactorhpp) - Event loop over epoll: descriptors, timers and tasks posted from other threads, calling intrusive...
 - [`io/reader.hpp`](6-resources.md#ioreaderhpp) - Buffered input from a file descriptor.
 - [`io/stream.hpp`](6-resources.md#iostreamhpp) - Buffered input and output over file descriptors: sockets, terminals, pipe pairs.
+- [`io/task.hpp`](6-resources.md#iotaskhpp) - Base of work handed to a reactor from any thread, Self deriving from task\<Self>: reactor::post qu...
+- [`io/timer.hpp`](6-resources.md#iotimerhpp) - Base of a timer, Self deriving from timer\<Self>: reactor::schedule_at and schedule_after arm it,...
+- [`io/watcher.hpp`](6-resources.md#iowatcherhpp) - Base of a descriptor handler, Self deriving from watcher\<Self>; reactor::watch registers it.
 - [`io/writer.hpp`](6-resources.md#iowriterhpp) - Buffered output to a file descriptor.
+- [`io/impl/task_node.hpp`](6-resources.md#ioimpltasknodehpp)
+- [`io/impl/timer_node.hpp`](6-resources.md#ioimpltimernodehpp)
+- [`io/impl/watch_node.hpp`](6-resources.md#ioimplwatchnodehpp)
 - [`print/flush.hpp`](6-resources.md#printflushhpp) - Writes out what print and printf buffered in this thread's stdout; the first error since the last...
 - [`print/print.hpp`](6-resources.md#printprinthpp) - Prints args, `{}` syntax (see format_string), checked at compile time: `ca::print("{} items in {}...
 - [`print/print_trace.hpp`](6-resources.md#printprinttracehpp) - Prints error and its thread trace (see ca::trace::record), then a newline: `ca::print_trace(r.err...
@@ -877,6 +918,7 @@ The include facade: what programs include.
 - [`inline_array.hpp`](ca.md#inlinearrayhpp) - `#include "ca/inline_array.hpp"`: 5-collections/array/inline_array.hpp.
 - [`inline_str.hpp`](ca.md#inlinestrhpp) - `#include "ca/inline_str.hpp"`: 5-collections/string/inline_str.hpp.
 - [`integers.hpp`](ca.md#integershpp) - `#include "ca/integers.hpp"`: 1-primitives/integers/.
+- [`interest.hpp`](ca.md#interesthpp) - `#include "ca/interest.hpp"`: 6-resources/io/interest.hpp.
 - [`intrusive_list.hpp`](ca.md#intrusivelisthpp) - `#include "ca/intrusive_list.hpp"`: 5-collections/list/intrusive_list.hpp.
 - [`inverted.hpp`](ca.md#invertedhpp) - `#include "ca/inverted.hpp"`: 2-vocabulary/inverted.hpp.
 - [`io.hpp`](ca.md#iohpp) - `#include "ca/io.hpp"`: 2-vocabulary/io/, 3-system/io/, 5-collections/io/, 6-resources/io/.
@@ -919,6 +961,7 @@ The include facade: what programs include.
 - [`printf_to.hpp`](ca.md#printftohpp) - `#include "ca/printf_to.hpp"`: 5-collections/format/printf_to.hpp.
 - [`process.hpp`](ca.md#processhpp) - `#include "ca/process.hpp"`: 3-system/process/.
 - [`random.hpp`](ca.md#randomhpp) - `#include "ca/random.hpp"`: 3-system/random/.
+- [`reactor.hpp`](ca.md#reactorhpp) - `#include "ca/reactor.hpp"`: 6-resources/io/reactor.hpp.
 - [`read_line.hpp`](ca.md#readlinehpp) - `#include "ca/read_line.hpp"`: 5-collections/io/read_line.hpp.
 - [`read_to_end.hpp`](ca.md#readtoendhpp) - `#include "ca/read_to_end.hpp"`: 5-collections/io/read_to_end.hpp.
 - [`reader.hpp`](ca.md#readerhpp) - `#include "ca/reader.hpp"`: 6-resources/io/reader.hpp.
@@ -947,10 +990,12 @@ The include facade: what programs include.
 - [`symbolizer.hpp`](ca.md#symbolizerhpp) - `#include "ca/symbolizer.hpp"`: 6-resources/trace/symbolizer.hpp.
 - [`sync.hpp`](ca.md#synchpp) - `#include "ca/sync.hpp"`: 3-system/sync/.
 - [`syscall.hpp`](ca.md#syscallhpp) - `#include "ca/syscall.hpp"`: 3-system/syscall/.
+- [`task.hpp`](ca.md#taskhpp) - `#include "ca/task.hpp"`: 6-resources/io/task.hpp.
 - [`text.hpp`](ca.md#texthpp) - `#include "ca/text.hpp"`: 1-primitives/text/, 3-system/text/.
 - [`text_writer.hpp`](ca.md#textwriterhpp) - `#include "ca/text_writer.hpp"`: 5-collections/format/text_writer.hpp.
 - [`thread.hpp`](ca.md#threadhpp) - `#include "ca/thread.hpp"`: 3-system/thread/.
 - [`time.hpp`](ca.md#timehpp) - `#include "ca/time.hpp"`: 3-system/time/.
+- [`timer.hpp`](ca.md#timerhpp) - `#include "ca/timer.hpp"`: 6-resources/io/timer.hpp.
 - [`trace.hpp`](ca.md#tracehpp) - `#include "ca/trace.hpp"`: 3-system/trace/, 5-collections/trace/, 6-resources/trace/.
 - [`traits.hpp`](ca.md#traitshpp) - `#include "ca/traits.hpp"`: 1-primitives/traits/.
 - [`trapped.hpp`](ca.md#trappedhpp) - `#include "ca/trapped.hpp"`: 4-lifecycle/trapped.hpp.
@@ -961,6 +1006,7 @@ The include facade: what programs include.
 - [`unicode.hpp`](ca.md#unicodehpp) - `#include "ca/unicode.hpp"`: 2-vocabulary/unicode/.
 - [`unique.hpp`](ca.md#uniquehpp) - `#include "ca/unique.hpp"`: 4-lifecycle/unique.hpp.
 - [`utility.hpp`](ca.md#utilityhpp) - `#include "ca/utility.hpp"`: 1-primitives/utility/.
+- [`watcher.hpp`](ca.md#watcherhpp) - `#include "ca/watcher.hpp"`: 6-resources/io/watcher.hpp.
 - [`with.hpp`](ca.md#withhpp) - `#include "ca/with.hpp"`: 4-lifecycle/with.hpp.
 - [`writer.hpp`](ca.md#writerhpp) - `#include "ca/writer.hpp"`: 6-resources/io/writer.hpp.
 - [`wstr.hpp`](ca.md#wstrhpp) - `#include "ca/wstr.hpp"`: 5-collections/string/wstr.hpp.

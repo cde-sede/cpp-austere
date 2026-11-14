@@ -1,5 +1,6 @@
 // expect: error value accessed without a check
 // mode: debug
+// sanitize: !undefined !coverage !address
 #include "2-vocabulary/result.hpp"
 
 constexpr auto f(void) noexcept -> ca::result<int> {

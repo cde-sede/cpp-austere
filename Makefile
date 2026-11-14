@@ -31,7 +31,23 @@
 #                        wrote (--fclean: traits, facade, syscall table, unicode tables,
 #                        str_python and regex_python tests, doc); make gen brings them back
 #
+#   make sanitize        test under ASan and under UBSan, with clang++ and g++, debug (T too);
+#                        the four are independent, -j runs them at once
+#   make coverage        test with clang source coverage (T too), then build/coverage/: index.html,
+#                        one page per source file, and summary.txt, lines and branches per file
+#   make fuzz F=NAME     run fuzz/NAME.cpp with libFuzzer (clang++, ASan and UBSan) on its corpus
+#                        build/fuzz/corpus/NAME, seeded from fuzz/seeds/NAME; TIME=seconds (60),
+#                        JOBS=processes (1); crashes land in build/fuzz/crashes/NAME
+#   make fuzz-smoke      every fuzz target on its seeds, then TIME (10) seconds each
+#   make fuzz-regex      differential: random patterns and subjects through ca::regex and
+#                        CPython's re (tooling/fuzz_regex.py); N=cases (20000), SEED=n
+#
 #   make CXX=g++ MODE=release
+#   make SAN=address     build and test into build/<cxx>-<mode>-address: libc links only (freestanding
+#                        tests skipped), ca::heap and ca::arena poison what they do not hand out
+#                        (ca_memory_poisoning); SAN=undefined: UBSan without its runtime, each check
+#                        a ca trap (3-system/sanitizer/ubsan.cpp), freestanding links too;
+#                        SAN=address,undefined both
 #   make MODE=release FRAME_POINTERS=1   keep frame pointers, for full trap backtraces
 #                        (ca::trace::backtrace); on by default in debug; make clean after
 #                        changing it, objects are not rebuilt for it
@@ -76,9 +92,29 @@ ifeq ($(FRAME_POINTERS),1)
 CXXFLAGS += -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
 endif
 
+comma := ,
+SAN ?=
+COVERAGE ?= 0
+SUFFIX :=
+ifneq ($(SAN),)
+CXXFLAGS += -fsanitize=$(SAN) -fno-sanitize-recover=all -fno-omit-frame-pointer
+SUFFIX := -$(subst $(comma),-,$(SAN))
+ifneq ($(filter address,$(subst $(comma), ,$(SAN))),)
+LDFLAGS += -fsanitize=address
+ifneq ($(findstring clang,$(CXX)),)
+LDFLAGS += --driver-mode=gcc
+endif
+endif
+endif
+ifeq ($(COVERAGE),1)
+CXXFLAGS += -fprofile-instr-generate -fcoverage-mapping
+LDFLAGS  += -fprofile-instr-generate
+SUFFIX := $(SUFFIX)-coverage
+endif
+
 GENERATORS := gen_traits gen_syscalls gen_unicode gen_float_tables gen_includes gen_str_test gen_regex_test autodoc
 
-BUILD := build/$(notdir $(CXX))-$(MODE)
+BUILD := build/$(notdir $(CXX))-$(MODE)$(SUFFIX)
 LIB   := $(BUILD)/libca.a
 SRCS  := $(shell find src/lib -type f -name '*.cpp')
 OBJS  := $(SRCS:%.cpp=$(BUILD)/%.o)
@@ -94,8 +130,14 @@ TEST_NAMES   := $(sort $(basename $(notdir $(TEST_MATCHES))))
 TEST_RESULTS := $(TEST_NAMES:%=$(BUILD)/tests/%.result)
 
 CONFIGS := clang++-debug clang++-release g++-debug g++-release
+SANITIZE_CONFIGS := clang++-address clang++-undefined g++-address g++-undefined
 
-.PHONY: all includes test leaks matrix matrix-includes $(CONFIGS:%=matrix-%) bench bench-doc syscalls unicode gen clean fclean FORCE
+FUZZ_SAN   := fuzzer-no-link,address,undefined
+FUZZ_NAMES := $(sort $(basename $(notdir $(wildcard fuzz/*.cpp))))
+FUZZ_BINS  := $(FUZZ_NAMES:%=$(BUILD)/fuzz/%)
+
+.PHONY: all includes test leaks matrix matrix-includes $(CONFIGS:%=matrix-%) sanitize $(SANITIZE_CONFIGS:%=sanitize-%) \
+	coverage fuzz fuzz-smoke fuzz-regex fuzz-build bench bench-doc syscalls unicode gen clean fclean FORCE
 
 all: includes $(LIB) $(RUNTIME)
 
@@ -123,7 +165,8 @@ test: $(TEST_RESULTS)
 
 $(BUILD)/tests/%.result: tests/%.cpp $(LIB) $(RUNTIME) FORCE | includes
 	@CXX='$(CXX)' MODE='$(MODE)' CXXFLAGS='$(CPPFLAGS) $(CXXFLAGS)' LDFLAGS='$(LDFLAGS)' \
-		LIB='$(LIB)' RUNTIME='$(RUNTIME)' BUILD='$(BUILD)' TAG='$(TAG)' tooling/test.sh $<
+		LIB='$(LIB)' RUNTIME='$(RUNTIME)' BUILD='$(BUILD)' TAG='$(TAG)' SAN='$(SAN)' \
+		COVERAGE='$(COVERAGE)' tooling/test.sh $<
 
 FORCE:
 
@@ -138,6 +181,46 @@ matrix-includes:
 $(CONFIGS:%=matrix-%): matrix-%: matrix-includes
 	@$(MAKE) --no-print-directory MATRIX=1 CXX=$(word 1,$(subst -, ,$*)) MODE=$(word 2,$(subst -, ,$*)) \
 		TAG='$(subst -, ,$*)' T='$(T)' leaks test
+
+sanitize: $(SANITIZE_CONFIGS:%=sanitize-%)
+
+$(SANITIZE_CONFIGS:%=sanitize-%): sanitize-%: matrix-includes
+	@$(MAKE) --no-print-directory MATRIX=1 CXX=$(word 1,$(subst -, ,$*)) MODE=debug SAN=$(word 2,$(subst -, ,$*)) \
+		TAG='$(subst -, ,$*)' T='$(T)' test
+
+coverage: includes
+	@$(MAKE) --no-print-directory MATRIX=1 CXX=clang++ MODE=debug COVERAGE=1 T='$(T)' test || true
+	@BUILD=build/clang++-debug-coverage tooling/coverage.sh build/coverage
+
+fuzz: includes
+	@test -n '$(F)' || { echo 'make fuzz F=NAME, NAME one of: $(FUZZ_NAMES)'; exit 1; }
+	@$(MAKE) --no-print-directory MATRIX=1 CXX=clang++ MODE=debug SAN=$(FUZZ_SAN) build/clang++-debug-$(subst $(comma),-,$(FUZZ_SAN))/fuzz/$(F) \
+		build/fuzz/seeds/elf/object.o build/fuzz/seeds/elf/shared.so
+	@tooling/fuzz.sh build/clang++-debug-$(subst $(comma),-,$(FUZZ_SAN))/fuzz/$(F) $(or $(TIME),60) $(or $(JOBS),1)
+
+fuzz-smoke: includes
+	@$(MAKE) --no-print-directory MATRIX=1 CXX=clang++ MODE=debug SAN=$(FUZZ_SAN) fuzz-build
+	@status=0; for f in $(FUZZ_NAMES); do \
+		tooling/fuzz.sh build/clang++-debug-$(subst $(comma),-,$(FUZZ_SAN))/fuzz/$$f $(or $(TIME),10) 1 || status=1; \
+	done; exit $$status
+
+fuzz-build: $(FUZZ_BINS) build/fuzz/seeds/elf/object.o build/fuzz/seeds/elf/shared.so
+
+build/fuzz/seeds/elf/object.o: tests/dl/base.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) -std=$(STD) -nostdinc++ -fno-exceptions -fno-rtti -g -O1 -fPIC -c $< -o $@
+
+build/fuzz/seeds/elf/shared.so: tests/dl/base.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) -std=$(STD) -nostdinc++ -fno-exceptions -fno-rtti -g -O1 -fPIC -shared -nostdlib -fno-stack-protector $< -o $@
+
+$(BUILD)/fuzz/%: fuzz/%.cpp fuzz/fuzz.hpp $(LIB)
+	@mkdir -p $(@D)
+	$(CXX) $(CPPFLAGS) -I. $(subst fuzzer-no-link,fuzzer,$(CXXFLAGS)) $< -o $@ $(LIB) -pthread
+
+fuzz-regex: all
+	@CXX='$(CXX)' CXXFLAGS='$(CPPFLAGS) $(CXXFLAGS)' LDFLAGS='$(LDFLAGS)' LIB='$(LIB)' BUILD='$(BUILD)' \
+		python3 tooling/fuzz_regex.py --cases $(or $(N),20000) $(if $(SEED),--seed $(SEED))
 
 bench:
 	@bench/run.sh -c $(CXX) -b $(or $(B),dynamic_array)

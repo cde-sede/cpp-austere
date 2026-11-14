@@ -1,8 +1,10 @@
 // expect: exit 0
 // link: both
+// sanitize: !address
 // The malloc family as the program sees it: libc's, or libca_runtime's on ca::heap when linked
 // without libc. Sizes across the heap's classes and its large blocks, contents kept by realloc,
-// calloc zeroed and refusing overflow, aligned blocks, free(nullptr).
+// calloc zeroed and refusing overflow, aligned blocks, free(nullptr). Not under ASan: its malloc
+// is neither, and refuses aligned_alloc of a size no multiple of the alignment (C11).
 #include "1-primitives/integers/u8.hpp"
 #include "1-primitives/integers/usz.hpp"
 

@@ -1,5 +1,6 @@
 // expect: error value accessed without a check
 // mode: debug
+// sanitize: !undefined !coverage
 #include "2-vocabulary/optional.hpp"
 
 static auto twice(const ca::realized<int>& value) noexcept -> int {

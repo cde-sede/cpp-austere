@@ -1,0 +1,13 @@
+The parts of the reactor's handlers that the reactor itself touches, kept out of the handler
+templates so `io::reactor` is one non-template class.
+
+| Node | Holds | Used by |
+|---|---|---|
+| `watch_node` | dispatch function, owning reactor, descriptor, interest | `io::watcher<Self>`; its address is the epoll word |
+| `timer_node` | dispatch function, owning reactor, deadline, scheduling sequence, pairing-heap links (first child, next sibling, previous sibling or parent) | `io::timer<Self>` |
+| `task_node` | dispatch function, link in the posted stack, an atomic posted flag | `io::task<Self>` |
+
+Each `Self` base passes a static function that casts the node back to `Self` and calls its
+handlers, so a dispatch is one indirect call and no virtual table exists. Only the reactor
+writes the links (it is their friend). A copy of a node is never registered and assigning one
+leaves both registrations as they were: registrations belong to the place, as `list_link`'s do.

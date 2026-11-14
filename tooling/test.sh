@@ -12,7 +12,16 @@
 #   // expect: exit N          builds, runs, exits with status N
 #   // expect: error REGEX     does not build; diagnostics match REGEX (grep -E)
 #   // expect: trap            builds, then dies by a trap (SIGILL or SIGTRAP)
+#   // expect: report REGEX    builds, runs, fails, and its stderr matches REGEX (grep -E): what
+#                              a sanitizer prints
 #   // mode: debug             only checked in debug builds (or: release)
+#   // sanitize: NAME...       only checked when SAN (make SAN=...) has every NAME (address,
+#                              undefined; coverage: COVERAGE=1); !NAME: only when it has not
+#                              (UBSan's checks and coverage counters keep the optimizer from
+#                              proving what the compile-time access checks need)
+#
+# SAN=address and COVERAGE=1 need libc's runtime: freestanding links are skipped, "both"
+# links against libc only. Each run of a coverage build writes BUILD/tests/NAME.profraw.
 #   // link: freestanding      linked without libc, ca's own _start and runtime (RUNTIME,
 #                              built from src/runtime/), no startup files: twice, -static
 #                              and -static-pie, both run
@@ -40,23 +49,52 @@ arg=${expect#"$kind"}
 arg=${arg# }
 mode=$(sed -n 's|^// mode: ||p' "$test")
 
-if [ -n "$mode" ] && [ "$mode" != "$MODE" ]; then
-	printf '  skip  %s%-36s %s builds only\n' "$tag" "$name" "$mode"
+skip() {
+	printf '  skip  %s%-36s %s\n' "$tag" "$name" "$1"
 	echo skip > "$result"
 	exit 0
-fi
+}
+
+[ -n "$mode" ] && [ "$mode" != "$MODE" ] && skip "$mode builds only"
+
+sanitize=$(sed -n 's|^// sanitize: ||p' "$test")
+instrumented=",$SAN,"
+[ "$COVERAGE" = 1 ] && instrumented="$instrumented,coverage,"
+for term in $sanitize; do
+	case $term in
+	!*)
+		case $instrumented in
+		*",${term#!},"*) skip "not with ${term#!}" ;;
+		esac ;;
+	*)
+		case $instrumented in
+		*",$term,"*) ;;
+		*) skip "SAN=$term only" ;;
+		esac ;;
+	esac
+done
+
+hosted=0
+case ",$SAN," in
+*,address,*) hosted=1 ;;
+esac
+[ "$COVERAGE" = 1 ] && hosted=1
+export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:allocator_may_return_null=1}"
+export LLVM_PROFILE_FILE="$BUILD/tests/$name.profraw"
 
 ldflags=$(sed -n 's|^// ldflags: ||p' "$test")
 libraries=$BUILD/tests/${name}_libraries
 shared=$(sed -n 's|^// shared: ||p' "$test")
 extra=
+# Fixtures load through ca::dl, without libc nor a sanitizer runtime: built uninstrumented.
+fixture_flags=$(printf '%s\n' $CXXFLAGS | grep -v -e '^-fsanitize' -e '^-fno-sanitize' -e '^-fprofile' -e '^-fcoverage' | tr '\n' ' ')
 if [ -n "$shared" ]; then
 	mkdir -p "$libraries"
 	extra=-DCA_TEST_LIBRARIES=\"$libraries\"
 	while read -r library source flags; do
 		flags=$(printf '%s' "$flags" | sed "s|{dir}|$libraries|g")
 		# shellcheck disable=SC2086
-		if ! out=$($CXX $CXXFLAGS -fPIC -shared -nostdlib -fno-stack-protector "tests/$source" \
+		if ! out=$($CXX $fixture_flags -fPIC -shared -nostdlib -fno-stack-protector "tests/$source" \
 			-o "$libraries/lib$library.so" $flags 2>&1); then
 			printf '  FAIL  %s%-36s fixture lib%s.so does not build\n%s\n' "$tag" "$name" "$library" \
 				"$(printf '%s\n' "$out" | grep -m3 'error')"
@@ -78,7 +116,10 @@ check() {
 		out=$($CXX "$2.o" -o "$2_pie" -nostdlib -static-pie -Wl,-u,_start $ldflags \
 			-Wl,--start-group "$LIB" "$RUNTIME" -Wl,--end-group 2>&1)
 	else
-		out=$($CXX $CXXFLAGS $extra "$test" -o "$2" "$LIB" $LDFLAGS $ldflags 2>&1)
+		# Compiled, then linked with LDFLAGS alone: -fsanitize=undefined in CXXFLAGS would link
+		# UBSan's runtime, in place of ca's handlers.
+		out=$($CXX $CXXFLAGS $extra -c "$test" -o "$2.o" 2>&1) &&
+		out=$($CXX "$2.o" -o "$2" "$LIB" $LDFLAGS $ldflags 2>&1)
 	fi
 	built=$?
 	failure=
@@ -88,6 +129,18 @@ check() {
 			failure="built, but must not"
 		elif ! printf '%s\n' "$out" | grep -Eq -- "$arg"; then
 			failure="rejected, but not with /$arg/"
+		fi ;;
+	report)
+		if [ $built -ne 0 ]; then
+			failure="does not build"
+		else
+			stderr=$("$2" 2>&1 >/dev/null)
+			status=$?
+			if [ $status -eq 0 ]; then
+				failure="expected a report, exited 0"
+			elif ! printf '%s\n' "$stderr" | grep -Eq -- "$arg"; then
+				failure="status $status, stderr does not match /$arg/"
+			fi
 		fi ;;
 	exit|trap)
 		if [ $built -ne 0 ]; then
@@ -112,6 +165,8 @@ check() {
 
 link=$(sed -n 's|^// link: ||p' "$test")
 [ -z "$link" ] && [ "$kind" != error ] && link=both
+[ "$link" = freestanding ] && [ $hosted -eq 1 ] && skip "freestanding, not with SAN=$SAN COVERAGE=$COVERAGE"
+[ "$link" = both ] && [ $hosted -eq 1 ] && link=libc
 case $link in
 freestanding)
 	check freestanding "$bin" ;;

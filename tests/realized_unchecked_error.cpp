@@ -1,5 +1,6 @@
 // expect: error value accessed without a check
 // mode: debug
+// sanitize: !undefined !coverage
 #include "2-vocabulary/fail.hpp"
 #include "2-vocabulary/result.hpp"
 

@@ -7,6 +7,14 @@
 #include "2-vocabulary/io/is_windowed_writer.hpp"
 #include "3-system/io/dup2.hpp"
 #include "3-system/io/enter_raw_mode.hpp"
+#include "3-system/io/epoll_add.hpp"
+#include "3-system/io/epoll_create.hpp"
+#include "3-system/io/epoll_modify.hpp"
+#include "3-system/io/epoll_remove.hpp"
+#include "3-system/io/epoll_wait.hpp"
+#include "3-system/io/eventfd.hpp"
+#include "3-system/io/eventfd_read.hpp"
+#include "3-system/io/eventfd_write.hpp"
 #include "3-system/io/get_terminal_size.hpp"
 #include "3-system/io/isatty.hpp"
 #include "3-system/io/pipe.hpp"
@@ -30,5 +38,8 @@
 #include "6-resources/io/err.hpp"
 #include "6-resources/io/in.hpp"
 #include "6-resources/io/stream.hpp"
+#include "6-resources/io/task.hpp"
+#include "6-resources/io/timer.hpp"
+#include "6-resources/io/watcher.hpp"
 
 #endif // ca_include_io_hpp

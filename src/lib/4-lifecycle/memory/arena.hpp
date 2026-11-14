@@ -5,6 +5,7 @@
 #include "1-primitives/utility/exchange.hpp"
 #include "2-vocabulary/result.hpp"
 #include "4-lifecycle/memory/arena_allocator.hpp"
+#include "4-lifecycle/memory/arena_scope.hpp"
 #include "4-lifecycle/memory/impl/arena_state.hpp"
 
 
@@ -26,8 +27,9 @@ namespace ca {
 
 	/* @DOC Owner of chunks of pages (page_allocator) carved by bumping a pointer, all released at
 	   once: an allocator resource, handing out arena_allocator. A chunk holds chunk_size bytes,
-	   or one larger block. Moving an arena keeps its allocators valid; cleanup() or reset()
-	   invalidates every block. Not thread-safe. */
+	   or one larger block. push() opens a scope of temporaries (arena_scope). Moving an arena
+	   keeps its allocators and scopes valid; cleanup() or reset() invalidates every block and
+	   scope. Not thread-safe. */
 	class arena final {
 
 
@@ -99,14 +101,23 @@ namespace ca {
 
 				if (_state == nullptr) [[unlikely]]
 					ca::impl::allocator_of_an_empty_arena();
-				return ca::arena_allocator{_state};
+				return ca::arena_allocator{&_state->_lanes[0]};
+			}
+
+			/* @DOC A scope of temporaries over this arena, released by its pop(); its results are
+			   blocks of the arena, as from allocator(). Traps on an empty arena. */
+			[[nodiscard]] auto push(void) const noexcept -> ca::arena_scope {
+
+				if (_state == nullptr) [[unlikely]]
+					ca::impl::allocator_of_an_empty_arena();
+				return ca::arena_scope{&_state->_lanes[1]};
 			}
 
 
 			// -- methods ----------------------------------------------------
 
-			/* @DOC Releases every chunk but the first, and empties it: every block is gone, the
-			   allocators stay valid. */
+			/* @DOC Releases every chunk but the first, and empties it: every block and scope is
+			   gone, the allocators stay valid. */
 			auto reset(void) noexcept -> void;
 
 			/* @DOC Releases every chunk; the arena is empty after. */

@@ -32,6 +32,14 @@ Everything below is templated on the geometry `G` (`ca::is_heap_geometry`) of a
 
 `arena_state.hpp`: an arena's state lives in its first chunk, right after the `arena_chunk`
 header (previous chunk, size), so it never moves and the `arena_allocator`s, which point to it,
-stay valid when the `ca::arena` object itself is moved. Blocks are carved from `_top` up to
-`_end` of the newest chunk; a request that does not fit starts a new chunk, or gets a chunk of
-its own when larger than the chunk size.
+stay valid when the `ca::arena` object itself is moved. The state holds two lanes
+(`arena_lane`), each its own chain of chunks: blocks are carved from `_top` up to `_end` of the
+lane's newest chunk; a request that does not fit starts a new chunk (the lane's spare when it has
+one large enough), or gets a chunk of its own when larger than the chunk size. Lane 0 starts in
+the first chunk and serves `arena::allocator()`; lane 1 maps nothing until a scope allocates in it.
+
+An `arena_scope` is a lane and a mark, the lane's `_top` when it was pushed (null for a lane
+holding nothing yet); a nested scope takes the other lane (`_other`). `arena_pop` finds the chunk
+holding the mark, trapping when none of the lane's does or when the mark lies above `_top` in the
+newest one, releases the chunks after it, the oldest of the standard size kept as the lane's
+spare so that push and pop in a loop never remap, and puts `_top` back on the mark.
